@@ -405,13 +405,6 @@ void kernel_restart(char *cmd)
 		printk(KERN_EMERG "Restarting system.\n");
 	else
 		printk(KERN_EMERG "Restarting system with command '%s'.\n", cmd);
-
-	#ifdef CONFIG_JRD_BUTTON_RAMCONSOLE_WDT
-	//add by jch for ramconsole cache reboot task and parent task PR-802169
-	printk(KERN_EMERG "Current task:%s(%d), Parent task:%s(%d).\n",current->comm, current->pid,current->real_parent->comm,current->real_parent->pid);
-	//END add by jch for ramconsole cache reboot task and parent task PR-802169
-	#endif
-
 	kmsg_dump(KMSG_DUMP_RESTART);
 	machine_restart(cmd);
 }
@@ -455,13 +448,6 @@ void kernel_power_off(void)
 	migrate_to_reboot_cpu();
 	syscore_shutdown();
 	printk(KERN_EMERG "Power down.\n");
-
-	#ifdef CONFIG_JRD_BUTTON_RAMCONSOLE_WDT
-	//add by jch for ramconsole cache power off task and parent task PR-802169
-	printk(KERN_EMERG "Current task:%s(%d), Parent task:%s(%d).\n",current->comm, current->pid,current->real_parent->comm,current->real_parent->pid);
-	//END add by jch for ramconsole cache  power off  task and parent task PR-802169
-	#endif
-
 	kmsg_dump(KMSG_DUMP_POWEROFF);
 	machine_power_off();
 }
@@ -2201,7 +2187,7 @@ static int prctl_set_vma_anon_name(unsigned long start, unsigned long end,
 			tmp = end;
 
 		/* Here vma->vm_start <= start < tmp <= (end|vma->vm_end). */
-		error = prctl_update_vma_anon_name(vma, &prev, start, end,
+		error = prctl_update_vma_anon_name(vma, &prev, start, tmp,
 				(const char __user *)arg);
 		if (error)
 			return error;
@@ -2441,12 +2427,12 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		if (arg2 != 1 || arg3 || arg4 || arg5)
 			return -EINVAL;
 
-		task_set_no_new_privs(current);
+		current->no_new_privs = 1;
 		break;
 	case PR_GET_NO_NEW_PRIVS:
 		if (arg2 || arg3 || arg4 || arg5)
 			return -EINVAL;
-		return task_no_new_privs(current) ? 1 : 0;
+		return current->no_new_privs ? 1 : 0;
 	case PR_SET_VMA:
 		error = prctl_set_vma(arg2, arg3, arg4, arg5);
 		break;

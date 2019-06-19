@@ -24,33 +24,11 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/regulator/machine.h>
-
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/bitops.h>
 #include <linux/qpnp/qpnp-adc.h>
 #include <linux/completion.h>
-
-#ifndef DISABLE_PR_DEBUG_LOG
-#ifdef pr_debug
-#undef pr_debug
-#endif
-
-#ifndef pr_debug
-#define pr_debug(fmt, ...) \
-	printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
-#endif
-#endif
-
-#ifdef CONFIG_TCT_8909_PIXI35
-#define JRD_PIXI35_CHARGING_POLICY
-#define JRD_PIXI35_3100_POWER_OFF
-#endif
-
-#ifdef CONFIG_TCT_8909_PIXI355
-#define JRD_PIXI35_CHARGING_POLICY
-#define JRD_PIXI35_3100_POWER_OFF
-#endif
 
 #define _SMB1360_MASK(BITS, POS) \
 	((unsigned char)(((1 << (BITS)) - 1) << (POS)))
@@ -103,9 +81,7 @@
 
 #define CFG_BATT_MISSING_REG		0x0D
 #define BATT_MISSING_SRC_THERM_BIT	BIT(1)
-//JRD BSP hychu[charger]porting smb1360"
-#define BATT_MISSING_SRC_BMD_BIT    BIT(0)
-//JRD BSP hychu[charger]porting smb1360" 
+
 #define CFG_FG_BATT_CTRL_REG		0x0E
 #define CFG_FG_OTP_BACK_UP_ENABLE	BIT(7)
 #define BATT_ID_ENABLED_BIT		BIT(5)
@@ -125,14 +101,13 @@
 #define IRQ2_CFG_REG			0x10
 #define IRQ2_SAFETY_TIMER_BIT		BIT(7)
 #define IRQ2_CHG_ERR_BIT		BIT(6)
-#define IRQ2_BATT_OV_BIT		BIT(5)
 #define IRQ2_CHG_PHASE_CHANGE_BIT	BIT(4)
 #define IRQ2_POWER_OK_BIT		BIT(2)
 #define IRQ2_BATT_MISSING_BIT		BIT(1)
 #define IRQ2_VBAT_LOW_BIT		BIT(0)
 
 #define IRQ3_CFG_REG			0x11
-#define IRQ3_FG_ACCESS_OK_BIT	BIT(6)
+#define IRQ3_FG_ACCESS_OK_BIT		BIT(6)
 #define IRQ3_SOC_CHANGE_BIT		BIT(4)
 #define IRQ3_SOC_MIN_BIT		BIT(3)
 #define IRQ3_SOC_MAX_BIT		BIT(2)
@@ -275,14 +250,6 @@
 #define SMB1360_POWERON_DELAY_MS	2000
 #define SMB1360_FG_RESET_DELAY_MS	1500
 
-#if defined(CONFIG_TCT_BATT_ID_SUPPORT)
-#define BATTERY_A_ID_MIN_UV    1000000
-#define BATTERY_A_ID_MAX_UV	   1400000
-
-#define BATTERY_B_ID_MIN_UV    150000
-#define BATTERY_B_ID_MAX_UV	   450000
-#endif
-
 enum {
 	WRKRND_FG_CONFIG_FAIL = BIT(0),
 	WRKRND_BATT_DET_FAIL = BIT(1),
@@ -292,9 +259,6 @@ enum {
 
 enum {
 	USER	= BIT(0),
-#if defined(CONFIG_TCT_BATT_ID_SUPPORT)
-	BATT_ID = BIT(1),
-#endif
 };
 
 enum {
@@ -318,18 +282,12 @@ enum {
 };
 
 static int otg_curr_ma[] = {350, 550, 950, 1500};
+
 struct smb1360_otg_regulator {
 	struct regulator_desc	rdesc;
 	struct regulator_dev	*rdev;
 };
-#if defined(JRD_PIXI35_CHARGING_POLICY)
-enum thermal_mitigation_current{
-	THERMAL_MITIGATION_1500,
-	THERMAL_MITIGATION_850,
-	THERMAL_MITIGATION_650,
-	THERMAL_MITIGATION_550,
-};
-#endif
+
 struct smb1360_chip {
 	struct i2c_client		*client;
 	struct device			*dev;
@@ -338,11 +296,6 @@ struct smb1360_chip {
 	u8				soft_cold_rt_stat;
 	struct delayed_work		jeita_work;
 	struct delayed_work		delayed_init_work;
-/* JRD BSP START hychu porting from NB, add power off condition */
-#ifdef JRD_PIXI35_3100_POWER_OFF
-	struct delayed_work         low_voltage_detect_work;
-#endif
-/* JRD BSP END hychu porting from NB, add power off condition*/
 	unsigned short			default_i2c_addr;
 	unsigned short			fg_i2c_addr;
 	bool				pulsed_irq;
@@ -452,16 +405,6 @@ struct smb1360_chip {
 	struct work_struct		parallel_work;
 	struct mutex			otp_gain_lock;
 	struct mutex			fg_access_request_lock;
-/* [PLATFORM]-Mod-BEGIN by TCTSH.SZY, PR-898917, 2015/03/19, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_PIXI35_ENABLE
-	struct delayed_work	        power_supply_change_work;
-#endif
-/* [PLATFORM]-Mod-END by TCTSH.SZY */
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-	struct delayed_work			batt_id_detect_work;
-#endif
-	bool					battery_ov_flag;
-	struct delayed_work     battery_ov_work;
 };
 
 static int chg_time[] = {
@@ -789,8 +732,8 @@ static int smb1360_force_fg_reset(struct smb1360_chip *chip)
 #define SMB1360_FG_ACCESS_RETRY_COUNT	3
 static int smb1360_enable_fg_access(struct smb1360_chip *chip)
 {
-	int rc;
-	u8 reg = 0, retry = SMB1360_FG_ACCESS_RETRY_COUNT;
+	int rc = 0;
+	u8 reg, retry = SMB1360_FG_ACCESS_RETRY_COUNT;
 
 	pr_debug("request FG memory access\n");
 	/*
@@ -825,7 +768,6 @@ static int smb1360_enable_fg_access(struct smb1360_chip *chip)
 		else
 			break;
 	}
-
 	if (rc == 0) /* timed out */
 		rc = -ETIMEDOUT;
 	else if (rc > 0) /* completed */
@@ -911,18 +853,7 @@ static int read_revision(struct smb1360_chip *chip, u8 *revision)
 static int smb1360_float_voltage_set(struct smb1360_chip *chip, int vfloat_mv)
 {
 	u8 temp;
-	/*#if defined(JRD_PIXI35_CHARGING_POLICY)
-	if(chip->batt_warm){ // voltage based recharge
-	smb1360_masked_write(chip, CFG_CHG_FUNC_CTRL_REG,
-				CHG_RECHG_THRESH_FG_SRC_BIT,
-				0);
-	}
-	else{ // SOC based recharge
-	smb1360_masked_write(chip, CFG_CHG_FUNC_CTRL_REG,
-				CHG_RECHG_THRESH_FG_SRC_BIT,
-				CHG_RECHG_THRESH_FG_SRC_BIT);
-	}
-	#endif*/
+
 	if ((vfloat_mv < MIN_FLOAT_MV) || (vfloat_mv > MAX_FLOAT_MV)) {
 		dev_err(chip->dev, "bad float voltage mv =%d asked to set\n",
 					vfloat_mv);
@@ -1154,10 +1085,11 @@ static int smb1360_get_prop_batt_capacity(struct smb1360_chip *chip)
 	if (temp > (MAX_8_BITS / 2))
 		soc += 1;
 
-	pr_err("msys_soc_reg=0x%02x, fg_soc=%d batt_full = %d\n", reg,
+	pr_debug("msys_soc_reg=0x%02x, fg_soc=%d batt_full = %d\n", reg,
 						soc, chip->batt_full);
 
 	chip->soc_now = (chip->batt_full ? 100 : bound(soc, 0, 100));
+
 	return chip->soc_now;
 }
 
@@ -1202,16 +1134,12 @@ static int smb1360_get_prop_batt_temp(struct smb1360_chip *chip)
 	temp = div_u64(temp * 625, 10000UL);	/* temperature in kelvin */
 	temp = (temp - 273) * 10;		/* temperature in decideg */
 
-	pr_err("reg[0]=0x%02x reg[1]=0x%02x temperature=%d\n",
+	pr_debug("reg[0]=0x%02x reg[1]=0x%02x temperature=%d\n",
 					reg[0], reg[1], temp);
-#if defined FEATURE_TCTSH_FIX_BATTERY_TEMPERATURE
-	return 250;
-#else
 
 	chip->temp_now = temp;
 
 	return chip->temp_now;
-#endif
 }
 
 static int smb1360_get_prop_voltage_now(struct smb1360_chip *chip)
@@ -1709,85 +1637,7 @@ static int smb1360_battery_is_writeable(struct power_supply *psy,
 	}
 	return rc;
 }
-#ifdef FEATURE_TCTNB_MMITEST 
-static int smb1360_battery_get_property(struct power_supply *psy,
-				       enum power_supply_property prop,
-				       union power_supply_propval *val)
-{
-	struct smb1360_chip *chip = container_of(psy,
-				struct smb1360_chip, batt_psy);
-	int temp;
-	switch (prop) {
-	case POWER_SUPPLY_PROP_HEALTH:
-		temp = smb1360_get_prop_batt_health(chip);
-		val->intval = POWER_SUPPLY_HEALTH_GOOD;
-		
-		break;
-	case POWER_SUPPLY_PROP_PRESENT:
-		temp = smb1360_get_prop_batt_present(chip);
-		val->intval = 1;
-		break;
-	case POWER_SUPPLY_PROP_STATUS:
-		val->intval = smb1360_get_prop_batt_status(chip);
-		break;
-	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
-		val->intval = smb1360_get_prop_charging_status(chip);
-		break;
-	case POWER_SUPPLY_PROP_CHARGE_TYPE:
-		val->intval = smb1360_get_prop_charge_type(chip);
-		break;
-/* [PLATFORM]-Mod-BEGIN by xiaoming.hu@tcl.com merge from TCTNB return the real battery capacity on mini sw */
-	case POWER_SUPPLY_PROP_CAPACITY:
-		val->intval = smb1360_get_prop_batt_capacity(chip);
-		if (chip->batt_present == 0)
-			val->intval = 50;
-		break;
-	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
-		val->intval = smb1360_get_prop_chg_full_design(chip);
-		if (chip->batt_present == 0)
-			val->intval = 3000000;
-		break;
-	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		val->intval = smb1360_get_prop_voltage_now(chip);
-		if (chip->batt_present == 0)
-			val->intval = 3900000;
-/* [PLATFORM]-Add-BEGIN by xiaoming.hu@tcl.com add power off condition */
-		if (val->intval <= 3100000)
-			val->intval = 3101000;
-/* [PLATFORM]-Add-END by xiaoming.hu@tcl.com */
-		break;
-	case POWER_SUPPLY_PROP_CURRENT_NOW:
-		val->intval = smb1360_get_prop_current_now(chip);
-		break;
-	case POWER_SUPPLY_PROP_RESISTANCE:
-		val->intval = smb1360_get_prop_batt_resistance(chip);
-		if (chip->batt_present == 0)
-			val->intval = 100000;
-		break;
-/* [PLATFORM]-Mod-END by xiaoming.hu@tcl.com*/
-	case POWER_SUPPLY_PROP_TEMP:
-		temp = smb1360_get_prop_batt_temp(chip);
-		val->intval = 250;
-		break;
-	case POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL:
-		val->intval = chip->therm_lvl_sel;
-		//???? val->intval = 250;
-		break;
-	default:
-		return -EINVAL;
-	}
-	return 0;
-}
 
-
-
-
-#else
-/* JRD BSP START hychu porting from NB, add power off condition */
-#ifdef JRD_PIXI35_3100_POWER_OFF
-static bool recheck_flag = true;
-#endif
-/* JRD BSP END hychu porting from NB, add power off condition */
 static int smb1360_battery_get_property(struct power_supply *psy,
 				       enum power_supply_property prop,
 				       union power_supply_propval *val)
@@ -1819,20 +1669,6 @@ static int smb1360_battery_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		val->intval = smb1360_get_prop_voltage_now(chip);
-/* JRD BSP START hychu porting from NB, add power off condition */
-#ifdef JRD_PIXI35_3100_POWER_OFF
-		if (unlikely(val->intval > 3100000 && recheck_flag == false)) {
-			cancel_delayed_work(&chip->low_voltage_detect_work);
-			recheck_flag = true;
-		}
-		if (unlikely(val->intval <= 3100000 && recheck_flag == true /* && chip->usb_present */ )) {
-			recheck_flag = false;
-			val->intval = 3101000;
-			schedule_delayed_work(&chip->low_voltage_detect_work, msecs_to_jiffies(5000));
-			pr_err("Recheck battery voltage in 5 seconds!\n");
-		}
-#endif
-/* JRD BSP END hychu porting from NB, add power off condition*/
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		val->intval = smb1360_get_prop_current_now(chip);
@@ -1851,17 +1687,7 @@ static int smb1360_battery_get_property(struct power_supply *psy,
 	}
 	return 0;
 }
-#endif
-/* JRD BSP START hychu porting from NB, add power off condition */
-#ifdef JRD_PIXI35_3100_POWER_OFF
-static void low_voltage_detect_work_fn(struct work_struct *work)
-{
-	struct smb1360_chip *chip = container_of(work, struct smb1360_chip,
-							low_voltage_detect_work.work);
-	power_supply_changed(&chip->batt_psy);
-}
-#endif
-/* JRD BSP END hychu porting from NB, add power off condition */
+
 static void smb1360_external_power_changed(struct power_supply *psy)
 {
 	struct smb1360_chip *chip = container_of(psy,
@@ -1937,66 +1763,6 @@ static int cold_hard_handler(struct smb1360_chip *chip, u8 rt_stat)
 	return 0;
 }
 
-/* [PLATFORM]-Mod-BEGIN by TCTSH.SZY, PR-898917, 2015/03/19, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_PIXI35_ENABLE
-#define POEWR_SUPPLY_CHANGE_PERIOD_MS	10000
-#define DEFAULT_TEMP 250
-static void power_supply_change_work(struct work_struct *work)
-{
-        struct delayed_work *dwork = to_delayed_work(work);
-	struct smb1360_chip *chip = container_of(dwork, struct smb1360_chip,
-							power_supply_change_work);
-	/*static int temp_pre = DEFAULT_TEMP;
-	int temp_now = smb1360_get_prop_batt_temp(chip);
-	int voltage_now = smb1360_get_prop_voltage_now(chip);
-
-	pr_debug("temp_pre = %d, temp_now = %d, voltage_now = %d\n",
-				temp_pre, temp_now, voltage_now);
-
-	if ((abs(temp_now - temp_pre) >= 10) || (voltage_now < 3200000)) {
-		temp_pre = temp_now;
-		power_supply_changed(&chip->batt_psy);
-	}*/
-        power_supply_changed(&chip->batt_psy);
-
-	schedule_delayed_work(&chip->power_supply_change_work,
-			msecs_to_jiffies(POEWR_SUPPLY_CHANGE_PERIOD_MS));
-}
-#endif
-/* [PLATFORM]-Add-END by TCTSH.SZY */
-
-static void battery_ov_work_fn(struct work_struct *work)
-{
-	u8 reg;
-	int voltage_now, vfloat_now, rc = 0;
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct smb1360_chip *chip = container_of(dwork, struct smb1360_chip,
-							battery_ov_work);
-
-	voltage_now = smb1360_get_prop_voltage_now(chip);
-	rc = smb1360_read(chip, BATT_CHG_FLT_VTG_REG, &reg);
-	if(rc)
-		pr_err("read vfloat_now fail rc=%d\n", rc);
-	else {
-		reg = reg & VFLOAT_MASK;
-		vfloat_now = reg * 10000 + 3460000;
-		pr_debug("voltage_now=%d, vfloat_now=%d\n", voltage_now, vfloat_now);
-		if(chip->voltage_now < vfloat_now){
-			rc = smb1360_masked_write(chip, CMD_CHG_REG,CMD_CHG_EN, 0);
-			if(rc) {
-				pr_err("disable charger fail rc=%d\n", rc);
-			}
-			msleep(5);
-			rc = smb1360_masked_write(chip, CMD_CHG_REG,CMD_CHG_EN, CMD_CHG_EN);
-			if(rc) {
-				pr_err("enable charger fail rc=%d\n", rc);
-			}
-		} else {
-			schedule_delayed_work(&chip->battery_ov_work, msecs_to_jiffies(200));
-		}
-	}
-}
-
 /*
  * This worker thread should only be called when WRKRND_HARD_JEITA
  * is set.
@@ -2012,16 +1778,17 @@ static void smb1360_jeita_work_fn(struct work_struct *work)
 	struct smb1360_chip *chip = container_of(dwork, struct smb1360_chip,
 							jeita_work);
 	temp = smb1360_get_prop_batt_temp(chip);
-	if (temp > chip->hot_bat_decidegc) {//>55
+
+	if (temp > chip->hot_bat_decidegc) {
 		/* battery status is hot, only config thresholds */
 		rc = smb1360_set_soft_jeita_threshold(chip,
-			chip->warm_bat_decidegc, chip->hot_bat_decidegc);//45-55
+			chip->warm_bat_decidegc, chip->hot_bat_decidegc);
 		if (rc) {
 			dev_err(chip->dev, "Couldn't set jeita threshold\n");
 			goto end;
 		}
 	} else if (temp > chip->warm_bat_decidegc ||
-		(temp == chip->warm_bat_decidegc && !!chip->soft_hot_rt_stat)) {//>45
+		(temp == chip->warm_bat_decidegc && !!chip->soft_hot_rt_stat)) {
 		/* battery status is warm, do compensation manually */
 		chip->batt_warm = true;
 		chip->batt_cool = false;
@@ -2030,53 +1797,17 @@ static void smb1360_jeita_work_fn(struct work_struct *work)
 			dev_err(chip->dev, "Couldn't set float voltage\n");
 			goto end;
 		}
-
-		#if defined(JRD_PIXI35_CHARGING_POLICY)
-		rc = smb1360_system_temp_level_set(chip, THERMAL_MITIGATION_650);
-		#else
 		rc = smb1360_set_appropriate_usb_current(chip);
-		#endif
-
 		if (rc)
 			pr_err("Couldn't set USB current\n");
-		#if defined(JRD_PIXI35_CHARGING_POLICY)
 		rc = smb1360_set_soft_jeita_threshold(chip,
-			(chip->warm_bat_decidegc - 20), (chip->hot_bat_decidegc));//43-55
-		#else
-		rc = smb1360_set_soft_jeita_threshold(chip,
-                       chip->warm_bat_decidegc, chip->hot_bat_decidegc);
-		#endif
-
+			chip->warm_bat_decidegc, chip->hot_bat_decidegc);
 		if (rc) {
 			dev_err(chip->dev, "Couldn't set jeita threshold\n");
 			goto end;
 		}
-	}
-	#if defined(JRD_PIXI35_CHARGING_POLICY)
-	else if ((temp > 410 ||
-		(temp == 410 && !!chip->soft_hot_rt_stat)) ) {//>42
-		/* battery status is warm, do compensation manually */
-		chip->batt_warm = false;
-		chip->batt_cool = false;
-		rc = smb1360_float_voltage_set(chip, chip->cool_bat_mv);
-
-		if (rc) {
-			dev_err(chip->dev, "Couldn't set float voltage\n");
-			goto end;
-		}
-		rc = smb1360_system_temp_level_set(chip, THERMAL_MITIGATION_650);
-		if (rc)
-			pr_err("Couldn't set USB current\n");
-		rc = smb1360_set_soft_jeita_threshold(chip,390, 460);//39-46
-		if (rc) {
-			dev_err(chip->dev, "Couldn't set jeita threshold\n");
-			goto end;
-		}
-	
-	}
-	#endif
-	 else if (temp > chip->cool_bat_decidegc ||
-		(temp == chip->cool_bat_decidegc && !chip->soft_cold_rt_stat)) {//>10
+	} else if (temp > chip->cool_bat_decidegc ||
+		(temp == chip->cool_bat_decidegc && !chip->soft_cold_rt_stat)) {
 		/* battery status is good, do the normal charging */
 		chip->batt_warm = false;
 		chip->batt_cool = false;
@@ -2085,27 +1816,16 @@ static void smb1360_jeita_work_fn(struct work_struct *work)
 			dev_err(chip->dev, "Couldn't set float voltage\n");
 			goto end;
 		}
-		#if defined(JRD_PIXI35_CHARGING_POLICY)
-		rc = smb1360_system_temp_level_set(chip, THERMAL_MITIGATION_1500);
-		#else
 		rc = smb1360_set_appropriate_usb_current(chip);
-		#endif
-		
 		if (rc)
 			pr_err("Couldn't set USB current\n");
-		#if defined(JRD_PIXI35_CHARGING_POLICY)
 		rc = smb1360_set_soft_jeita_threshold(chip,
-			chip->cool_bat_decidegc, 420);//10-42
-		#else
-		rc = smb1360_set_soft_jeita_threshold(chip,
-                       chip->cool_bat_decidegc, chip->warm_bat_decidegc);
-		#endif
-
+			chip->cool_bat_decidegc, chip->warm_bat_decidegc);
 		if (rc) {
 			dev_err(chip->dev, "Couldn't set jeita threshold\n");
 			goto end;
 		}
-	} else if (temp > chip->cold_bat_decidegc) {//>0
+	} else if (temp > chip->cold_bat_decidegc) {
 		/* battery status is cool, do compensation manually */
 		chip->batt_cool = true;
 		chip->batt_warm = false;
@@ -2114,16 +1834,8 @@ static void smb1360_jeita_work_fn(struct work_struct *work)
 			dev_err(chip->dev, "Couldn't set float voltage\n");
 			goto end;
 		}
-		#if defined(JRD_PIXI35_CHARGING_POLICY)
-		rc = smb1360_system_temp_level_set(chip, THERMAL_MITIGATION_650);
-		if (rc)
-			pr_err("Couldn't set temp current\n");		
-		rc = smb1360_set_soft_jeita_threshold(chip,
-			chip->cold_bat_decidegc, 110);//0-11
-		#else
 		rc = smb1360_set_soft_jeita_threshold(chip,
 			chip->cold_bat_decidegc, chip->cool_bat_decidegc);
-		#endif
 		if (rc) {
 			dev_err(chip->dev, "Couldn't set jeita threshold\n");
 			goto end;
@@ -2131,14 +1843,14 @@ static void smb1360_jeita_work_fn(struct work_struct *work)
 	} else {
 		/* battery status is cold, only config thresholds */
 		rc = smb1360_set_soft_jeita_threshold(chip,
-			chip->cold_bat_decidegc, chip->cool_bat_decidegc);//0-10
+			chip->cold_bat_decidegc, chip->cool_bat_decidegc);
 		if (rc) {
 			dev_err(chip->dev, "Couldn't set jeita threshold\n");
 			goto end;
 		}
 	}
 
-	pr_err("warm %d, cool %d, soft_cold_rt_sts %d, soft_hot_rt_sts %d, jeita supported %d, threshold_now %d %d\n",
+	pr_debug("warm %d, cool %d, soft_cold_rt_sts %d, soft_hot_rt_sts %d, jeita supported %d, threshold_now %d %d\n",
 		chip->batt_warm, chip->batt_cool, !!chip->soft_cold_rt_stat,
 		!!chip->soft_hot_rt_stat, chip->soft_jeita_supported,
 		chip->soft_cold_thresh, chip->soft_hot_thresh);
@@ -2267,19 +1979,6 @@ static int aicl_done_handler(struct smb1360_chip *chip, u8 rt_stat)
 		pm_stay_awake(chip->dev);
 		schedule_work(&chip->parallel_work);
 	}
-
-	return 0;
-}
-
-static int battery_ov_handler(struct smb1360_chip *chip, u8 rt_stat)
-{
-	chip->battery_ov_flag = !!rt_stat;
-	pr_debug("battery over voltage=%d\n", chip->battery_ov_flag);
-
-	if(chip->battery_ov_flag)
-		schedule_delayed_work(&chip->battery_ov_work, 0);
-	else
-		cancel_delayed_work(&chip->battery_ov_work);
 
 	return 0;
 }
@@ -2644,7 +2343,6 @@ static struct irq_handler_info handlers[] = {
 			},
 			{
 				.name		= "battery_ov",
-				.smb_irq	= battery_ov_handler,
 			},
 		},
 	},
@@ -3415,18 +3113,13 @@ static int smb1360_check_batt_profile(struct smb1360_chip *chip)
 				(div_u64(chip->connected_rid, 10)))
 			break;
 	}
-	#ifdef CONFIG_TCT_8909_PIXI35
-	i = BATTERY_PROFILE_A;
-	#else
-	i = BATTERY_PROFILE_B;
-	#endif
 
 	if (i == BATTERY_PROFILE_MAX) {
 		pr_err("None of the battery-profiles match the connected-RID\n");
 		return 0;
 	} else {
 		if (i == loaded_profile) {
-			pr_debug("Loaded Profile-RID == connected-RID = %d \n", i);
+			pr_debug("Loaded Profile-RID == connected-RID\n");
 			return 0;
 		} else {
 			new_profile = (loaded_profile == BATTERY_PROFILE_A) ?
@@ -3451,7 +3144,6 @@ static int smb1360_check_batt_profile(struct smb1360_chip *chip)
 		pr_err("FG access timed-out, rc = %d\n", rc);
 		return rc;
 	}
-
 	/* delay after handshaking for profile-switch to continue */
 	msleep(1500);
 
@@ -3595,7 +3287,7 @@ static int smb1360_fg_config(struct smb1360_chip *chip)
 		v_now = (reg2[1] << 8) | reg2[0];
 		v_now = div_u64(v_now * 5000, 0x7FFF);
 
-		pr_err("v_predicted=%d v_now=%d reset_threshold=%d\n",
+		pr_debug("v_predicted=%d v_now=%d reset_threshold=%d\n",
 			v_predicted, v_now, chip->fg_reset_threshold_mv);
 
 		/*
@@ -3608,7 +3300,6 @@ static int smb1360_fg_config(struct smb1360_chip *chip)
 					temp, chip->fg_reset_threshold_mv);
 			/* delay for the FG access to settle */
 			msleep(1500);
-
 			rc = smb1360_force_fg_reset(chip);
 			if (rc) {
 				pr_err("Couldn't reset FG rc=%d\n", rc);
@@ -3987,73 +3678,6 @@ static int smb1360_jeita_init(struct smb1360_chip *chip)
 	return rc;
 }
 
-#if defined(CONFIG_TCT_BATT_ID_SUPPORT)
-static int64_t smb1360_get_battery_id(struct smb1360_chip *chip)
-{
-	int rc;
-	struct qpnp_vadc_result result;
-
-	rc = qpnp_vadc_read(chip->vadc_dev, LR_MUX2_BAT_ID, &result);
-	pr_debug("error reading batt id channel = %d, batt_id = %lld\n",
-				LR_MUX2_BAT_ID, result.physical);
-	if (rc) {
-		pr_err("error reading batt id channel = %d, rc = %d\n",
-					LR_MUX2_BAT_ID, rc);
-		return rc;
-	}
-
-	return result.physical;
-}
-
-#define BATT_ID_DETECT_PERIOD_MS	5000
-static void batt_id_detect_work(struct work_struct *work)
-{
-
-	struct smb1360_chip *chip = container_of(work,
-				struct smb1360_chip, batt_id_detect_work.work);
-
-	uint64_t battery_id = 0;
-	int rc;
-
-	battery_id = smb1360_get_battery_id(chip);
-	if (battery_id < 0){
-		pr_err("cannot read battery id err = %lld\n", battery_id);
-	}
-
-	rc = 0;
-#ifdef BATTERY_A_ID_MIN_UV
-	if((battery_id >= BATTERY_A_ID_MIN_UV) && (battery_id <= BATTERY_A_ID_MAX_UV))
-	{
-		rc = 1;
-	}
-#endif
-#ifdef BATTERY_B_ID_MIN_UV
-	if((battery_id >= BATTERY_B_ID_MIN_UV) && (battery_id <= BATTERY_B_ID_MAX_UV))
-	{
-		rc = 1;
-	}
-#endif
-
-	if(rc == 0)
-	{
-		chip->charging_disabled = true;
-		rc = smb1360_charging_disable(chip, BATT_ID, true);
-		if (rc)
-			pr_err("Failed to disable charging rc=%d\n", rc);
-	}
-	else
-	{
-		chip->charging_disabled = false;
-		rc = smb1360_charging_disable(chip, BATT_ID, false);
-		if (rc)
-			pr_err("Failed to disable charging rc=%d\n", rc);
-	}
-
-	schedule_delayed_work(&chip->batt_id_detect_work,
-			msecs_to_jiffies(BATT_ID_DETECT_PERIOD_MS));
-}
-#endif
-
 static int smb1360_otp_gain_init(struct smb1360_chip *chip)
 {
 	int rc = 0, gain_factor;
@@ -4114,7 +3738,6 @@ static int smb1360_hw_init(struct smb1360_chip *chip)
 		schedule_delayed_work(&chip->delayed_init_work,
 				msecs_to_jiffies(SMB1360_POWERON_DELAY_MS));
 	}
-
 	/*
 	 * set chg en by cmd register, set chg en by writing bit 1,
 	 * enable auto pre to fast
@@ -4271,7 +3894,7 @@ static int smb1360_hw_init(struct smb1360_chip *chip)
 
 	/* battery missing detection */
 	rc = smb1360_masked_write(chip, CFG_BATT_MISSING_REG,
-				BATT_MISSING_SRC_THERM_BIT | BATT_MISSING_SRC_BMD_BIT, //JRD BSP hychu[charger]porting smb1360" 
+				BATT_MISSING_SRC_THERM_BIT,
 				BATT_MISSING_SRC_THERM_BIT);
 	if (rc < 0) {
 		dev_err(chip->dev, "Couldn't set batt_missing config = %d\n",
@@ -4319,7 +3942,6 @@ static int smb1360_hw_init(struct smb1360_chip *chip)
 		rc = smb1360_write(chip, IRQ2_CFG_REG,
 				IRQ2_SAFETY_TIMER_BIT
 				| IRQ2_CHG_ERR_BIT
-				| IRQ2_BATT_OV_BIT
 				| IRQ2_CHG_PHASE_CHANGE_BIT
 				| IRQ2_POWER_OK_BIT
 				| IRQ2_BATT_MISSING_BIT
@@ -4374,11 +3996,7 @@ static int smb1360_hw_init(struct smb1360_chip *chip)
 			pr_err("Couldn't set OTG current limit, rc = %d\n", rc);
 	}
 
-#ifdef FEATURE_TCTSH_FAKE_BATTERY_FOR_CERT
-	rc = smb1360_charging_disable(chip, USER, true);
-#else
 	rc = smb1360_charging_disable(chip, USER, !!chip->charging_disabled);
-#endif
 	if (rc)
 		dev_err(chip->dev, "Couldn't '%s' charging rc = %d\n",
 			chip->charging_disabled ? "disable" : "enable", rc);
@@ -4438,17 +4056,17 @@ static void smb1360_delayed_init_work_fn(struct work_struct *work)
 
 	if (!rc) {
 		/*
-		* If the delayed hw init successfully, update battery
-		* power_supply to make sure the correct SoC reported
-		* timely.
-		*/
+		 * If the delayed hw init successfully, update battery
+		 * power_supply to make sure the correct SoC reported
+		 * timely.
+		 */
 		power_supply_changed(&chip->batt_psy);
 	} else if (rc == -ETIMEDOUT) {
 		/*
-		* If the delayed hw init failed causing by waiting for
-		* FG access timed-out, force a FG reset and queue the
-		* worker again to retry the initialization.
-		*/
+		 * If the delayed hw init failed causing by waiting for
+		 * FG access timed-out, force a FG reset and queue the
+		 * worker again to retry the initialization.
+		 */
 		pr_debug("delayed hw init timed-out, retry!");
 		rc = smb1360_force_fg_reset(chip);
 		if (rc) {
@@ -4513,16 +4131,10 @@ static int smb_parse_batt_id(struct smb1360_chip *chip)
 		return rc;
 	}
 	batt_id_uv = result.physical;
+
 	if (batt_id_uv == 0) {
 		/* vadc not correct or batt id line grounded, report 0 kohms */
 		pr_err("batt_id_uv = 0, batt-id grounded using same profile\n");
-	#if defined(CONFIG_TCT_BATT_ID_SUPPORT)
-		chip->charging_disabled = true;
-		rc = smb1360_charging_disable(chip, BATT_ID, true);
-		if (rc)
-			dev_err(chip->dev, "Couldn't '%s' charging rc = %d\n",
-				chip->charging_disabled ? "disable" : "enable", rc);
-	#endif
 		return 0;
 	}
 
@@ -4900,22 +4512,10 @@ static int smb1360_probe(struct i2c_client *client,
 	mutex_init(&chip->otp_gain_lock);
 	mutex_init(&chip->fg_access_request_lock);
 	INIT_DELAYED_WORK(&chip->jeita_work, smb1360_jeita_work_fn);
-	INIT_DELAYED_WORK(&chip->delayed_init_work, smb1360_delayed_init_work_fn);
-	INIT_DELAYED_WORK(&chip->battery_ov_work, battery_ov_work_fn);
-/* [PLATFORM]-Mod-BEGIN by TCTSH.SZY, PR-898917, 2015/03/19, improve the bat-temprt report frequency */
-    #ifdef CONFIG_TCT_8909_PIXI35_ENABLE
-	INIT_DELAYED_WORK(&chip->power_supply_change_work, power_supply_change_work);
-    #endif
-/* [PLATFORM]-Mod-END by TCTSH.SZY */
-/* JRD BSP START hychu porting from NB, add power off condition */
-#ifdef JRD_PIXI35_3100_POWER_OFF
-	INIT_DELAYED_WORK(&chip->low_voltage_detect_work, low_voltage_detect_work_fn);
-#endif
-/* JRD BSP END hychu porting from NB, add power off condition */
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-	INIT_DELAYED_WORK(&chip->batt_id_detect_work, batt_id_detect_work);
-#endif
+	INIT_DELAYED_WORK(&chip->delayed_init_work,
+			smb1360_delayed_init_work_fn);
 	init_completion(&chip->fg_mem_access_granted);
+
 	/* probe the device to check if its actually connected */
 	rc = smb1360_read(chip, CFG_BATT_CHG_REG, &reg);
 	if (rc) {
@@ -4993,16 +4593,7 @@ static int smb1360_probe(struct i2c_client *client,
 		}
 		enable_irq_wake(client->irq);
 	}
-/* [PLATFORM]-Mod-BEGIN by TCTSH.SZY, PR-898917, 2015/03/19, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_PIXI35_ENABLE
-	schedule_delayed_work(&chip->power_supply_change_work,
-			msecs_to_jiffies(POEWR_SUPPLY_CHANGE_PERIOD_MS));
-#endif
-/* [PLATFORM]-Add-END by TCTSH.SZY */
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-	schedule_delayed_work(&chip->batt_id_detect_work,
-			msecs_to_jiffies(BATT_ID_DETECT_PERIOD_MS));
-#endif
+
 	chip->debug_root = debugfs_create_dir("smb1360", NULL);
 	if (!chip->debug_root)
 		dev_err(chip->dev, "Couldn't create debug dir\n");
@@ -5119,6 +4710,7 @@ static int smb1360_probe(struct i2c_client *client,
 				"Couldn't create count debug file rc = %d\n",
 				rc);
 	}
+
 	dev_info(chip->dev, "SMB1360 revision=0x%x probe success! batt=%d usb=%d soc=%d\n",
 			chip->revision,
 			smb1360_get_prop_batt_present(chip),
@@ -5137,11 +4729,6 @@ fail_hw_init:
 static int smb1360_remove(struct i2c_client *client)
 {
 	struct smb1360_chip *chip = i2c_get_clientdata(client);
-/* JRD BSP START hychu porting from NB, add power off condition */
-#ifdef JRD_PIXI35_3100_POWER_OFF
-	cancel_delayed_work(&chip->low_voltage_detect_work);
-#endif
-/* JRD BSP END hychu porting from NB, add power off condition */
 	regulator_unregister(chip->otg_vreg.rdev);
 	power_supply_unregister(&chip->batt_psy);
 	mutex_destroy(&chip->charging_disable_lock);
@@ -5150,14 +4737,7 @@ static int smb1360_remove(struct i2c_client *client)
 	mutex_destroy(&chip->irq_complete);
 	mutex_destroy(&chip->otp_gain_lock);
 	mutex_destroy(&chip->fg_access_request_lock);
-	debugfs_remove_recursive(chip->debug_root);      
-/* [PLATFORM]-Mod-BEGIN by TCTSH.SZY, PR-898917, 2015/03/19, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_PIXI35_ENABLE
-	cancel_delayed_work(&chip->power_supply_change_work);
-#endif
-/* [PLATFORM]-Mod-END by TCTSH.SZY */
-	if(chip->battery_ov_flag)
-		cancel_delayed_work(&chip->battery_ov_work);
+	debugfs_remove_recursive(chip->debug_root);
 
 	return 0;
 }
@@ -5191,18 +4771,11 @@ static int smb1360_suspend(struct device *dev)
 		pr_err("Couldn't set irq2_cfg rc=%d\n", rc);
 
 	rc = smb1360_write(chip, IRQ3_CFG_REG, IRQ3_SOC_FULL_BIT
-                    | IRQ3_SOC_CHANGE_BIT /*add soc interrupt*/
 					| IRQ3_SOC_MIN_BIT
 					| IRQ3_SOC_EMPTY_BIT);
 	if (rc < 0)
 		pr_err("Couldn't set irq3_cfg rc=%d\n", rc);
-/* JRD BSP START hychu porting from NB, add power off condition */
-#ifdef JRD_PIXI35_3100_POWER_OFF
-	cancel_delayed_work(&chip->low_voltage_detect_work);
-#endif
-/* JRD BSP END hychu porting from NB, add power off condition */
-	if(chip->battery_ov_flag)
-		cancel_delayed_work(&chip->battery_ov_work);
+
 	mutex_lock(&chip->irq_complete);
 	chip->resume_completed = false;
 	mutex_unlock(&chip->irq_complete);
@@ -5219,10 +4792,6 @@ static int smb1360_suspend_noirq(struct device *dev)
 		pr_err_ratelimited("Aborting suspend, an interrupt was detected while suspending\n");
 		return -EBUSY;
 	}
-
-	if(chip->battery_ov_flag)
-		cancel_delayed_work(&chip->battery_ov_work);
-
 	return 0;
 }
 
@@ -5249,9 +4818,7 @@ static int smb1360_resume(struct device *dev)
 	} else {
 		mutex_unlock(&chip->irq_complete);
 	}
-	if(chip->battery_ov_flag)
-		schedule_delayed_work(&chip->battery_ov_work, 0);
-	pr_debug("power_supply_changed batt_psy\n");
+
 	power_supply_changed(&chip->batt_psy);
 
 	return 0;
@@ -5261,9 +4828,6 @@ static void smb1360_shutdown(struct i2c_client *client)
 {
 	int rc;
 	struct smb1360_chip *chip = i2c_get_clientdata(client);
-
-	if(chip->battery_ov_flag)
-		cancel_delayed_work(&chip->battery_ov_work);
 
 	rc = smb1360_otg_disable(chip);
 	if (rc)

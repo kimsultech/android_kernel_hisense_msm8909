@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,7 +21,6 @@
 #include <linux/notifier.h>
 #include <linux/irqreturn.h>
 #include <linux/kref.h>
-#include <linux/kthread.h>
 
 #include "mdss.h"
 #include "mdss_mdp_hwio.h"
@@ -203,6 +202,8 @@ struct mdss_mdp_ctl {
 
 	u16 width;
 	u16 height;
+	u16 border_x_off;
+	u16 border_y_off;
 	u32 dst_format;
 	bool is_secure;
 
@@ -508,10 +509,6 @@ struct mdss_overlay_private {
 	int retire_cnt;
 	bool kickoff_released;
 	u32 cursor_ndx[2];
-
-	struct kthread_worker worker;
-	struct kthread_work vsync_work;
-	struct task_struct *thread;
 };
 
 struct mdss_mdp_commit_cb {
@@ -722,7 +719,18 @@ static inline bool mdss_mdp_ctl_is_power_on_lp(struct mdss_mdp_ctl *ctl)
 static inline u32 left_lm_w_from_mfd(struct msm_fb_data_type *mfd)
 {
 	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
-	return (ctl && ctl->mixer_left) ? ctl->mixer_left->width : 0;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	int width = 0;
+
+	if (ctl && ctl->mixer_left) {
+		width =  ctl->mixer_left->width;
+		width -= (pinfo->lcdc.border_left + pinfo->lcdc.border_right);
+		pr_debug("ctl=%d mw=%d l=%d r=%d w=%d\n",
+			ctl->num, ctl->mixer_left->width,
+			pinfo->lcdc.border_left, pinfo->lcdc.border_right,
+			width);
+	}
+	return width;
 }
 
 irqreturn_t mdss_mdp_isr(int irq, void *ptr);

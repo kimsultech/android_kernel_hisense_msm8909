@@ -349,15 +349,8 @@ fsg_hs_bulk_out_desc = {
 
 static struct usb_descriptor_header *fsg_hs_function[] = {
 	(struct usb_descriptor_header *) &fsg_intf_desc,
-//[BUGFIX]-Add-BEGIN by TCTNB.93391,07/02/2015,1035882,USB Driver Auto Install
-#if defined(CONFIG_JRD_CD_ROM_EMUM_EJECT) && !defined (FEATURE_TCTNB_MMITEST)
-	(struct usb_descriptor_header *) &fsg_hs_bulk_out_desc,
-	(struct usb_descriptor_header *) &fsg_hs_bulk_in_desc,
-#else
 	(struct usb_descriptor_header *) &fsg_hs_bulk_in_desc,
 	(struct usb_descriptor_header *) &fsg_hs_bulk_out_desc,
-#endif
-//[BUGFIX]-Add-END by TCTNB.93391,07/02/2015,1035882,USB Driver Auto Install
 	NULL,
 };
 
@@ -587,14 +580,6 @@ static ssize_t fsg_show_nofua(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%u\n", curlun->nofua);
 }
 
-static ssize_t fsg_show_cdrom (struct device *dev, struct device_attribute *attr,
-			   char *buf)
-{
-	struct fsg_lun  *curlun = fsg_lun_from_dev(dev);
-
-	return sprintf(buf, "%d\n", curlun->cdrom);
-}
-
 #ifdef CONFIG_USB_MSC_PROFILING
 static ssize_t fsg_show_perf(struct device *dev, struct device_attribute *attr,
 			      char *buf)
@@ -750,33 +735,4 @@ static ssize_t fsg_store_file(struct device *dev, struct device_attribute *attr,
 	}
 	up_write(filesem);
 	return (rc < 0 ? rc : count);
-}
-
-static ssize_t fsg_store_cdrom(struct device *dev, struct device_attribute *attr,
-				  const char *buf, size_t count)
-{
-	ssize_t    rc;
-	struct fsg_lun  *curlun = fsg_lun_from_dev(dev);
-	struct rw_semaphore  *filesem = dev_get_drvdata(dev);
-	unsigned  cdrom;
-
-	rc = kstrtouint(buf, 2, &cdrom);
-	if (rc)
-		return rc;
-
-	/*
-	 * Allow the cdrom status to change only while the
-	 * backing file is closed.
-	 */
-	down_read(filesem);
-	if (fsg_lun_is_open(curlun)) {
-		LDBG(curlun, "cdrom status change prevented\n");
-		rc = -EBUSY;
-	} else {
-		curlun->cdrom = cdrom;
-		LDBG(curlun, "cdrom status set to %d\n", curlun->cdrom);
-		rc = count;
-	}
-	up_read(filesem);
-	return rc;
 }

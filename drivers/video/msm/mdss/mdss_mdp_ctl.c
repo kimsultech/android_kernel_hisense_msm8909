@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -453,6 +453,24 @@ exit:
 	return;
 }
 
+static inline u32 get_panel_yres(struct mdss_panel_info *pinfo)
+{
+	u32 yres;
+
+	yres = pinfo->yres + pinfo->lcdc.border_top +
+				pinfo->lcdc.border_bottom;
+	return yres;
+}
+
+static inline u32 get_panel_xres(struct mdss_panel_info *pinfo)
+{
+	u32 xres;
+
+	xres = pinfo->xres + pinfo->lcdc.border_left +
+				pinfo->lcdc.border_right;
+	return xres;
+}
+
 /**
  * mdss_mdp_perf_calc_pipe() - calculate performance numbers required by pipe
  * @pipe:	Source pipe struct containing updated pipe params
@@ -511,7 +529,7 @@ int mdss_mdp_perf_calc_pipe(struct mdss_mdp_pipe *pipe,
 			fps = mdss_panel_get_framerate(pinfo);
 			v_total = mdss_panel_get_vtotal(pinfo);
 		}
-		xres = pinfo->xres;
+		xres = get_panel_xres(pinfo);
 		is_fbc = pinfo->fbc.enabled;
 		h_total = mdss_panel_get_htotal(pinfo, false);
 	} else {
@@ -917,83 +935,13 @@ static void __mdss_mdp_perf_calc_ctl_helper(struct mdss_mdp_ctl *ctl,
 			*(perf->bw_vote_mode));
 }
 
-static u32 mdss_check_for_flip(struct mdss_mdp_ctl *ctl)
-{
-	u32 i, panel_orientation;
-	struct mdss_mdp_pipe *pipe;
-	u32 flags = 0;
-
-	panel_orientation = ctl->mfd->panel_orientation;
-	if (panel_orientation & MDP_FLIP_LR)
-		flags |= MDSS_MAX_BW_LIMIT_HFLIP;
-	if (panel_orientation & MDP_FLIP_UD)
-		flags |= MDSS_MAX_BW_LIMIT_VFLIP;
-
-	for (i = 0; i < MAX_PIPES_PER_LM; i++) {
-		if ((flags & MDSS_MAX_BW_LIMIT_HFLIP) &&
-				(flags & MDSS_MAX_BW_LIMIT_VFLIP))
-			return flags;
-
-		if (ctl->mixer_left && ctl->mixer_left->stage_pipe[i]) {
-			pipe = ctl->mixer_left->stage_pipe[i];
-			if (pipe->flags & MDP_FLIP_LR)
-				flags |= MDSS_MAX_BW_LIMIT_HFLIP;
-			if (pipe->flags & MDP_FLIP_UD)
-				flags |= MDSS_MAX_BW_LIMIT_VFLIP;
-		}
-
-		if (ctl->mixer_right && ctl->mixer_right->stage_pipe[i]) {
-			pipe = ctl->mixer_right->stage_pipe[i];
-			if (pipe->flags & MDP_FLIP_LR)
-				flags |= MDSS_MAX_BW_LIMIT_HFLIP;
-			if (pipe->flags & MDP_FLIP_UD)
-				flags |= MDSS_MAX_BW_LIMIT_VFLIP;
-		}
-	}
-
-	return flags;
-}
-
-static int mdss_mdp_set_threshold_max_bandwidth(struct mdss_mdp_ctl *ctl)
-{
-	u32 mode, threshold = 0, max = INT_MAX;
-	u32 i = 0;
-	struct mdss_max_bw_settings *max_bw_settings =
-		ctl->mdata->max_bw_settings;
-
-	if (!ctl->mdata->max_bw_settings_cnt && !ctl->mdata->max_bw_settings)
-		return 0;
-
-	mode = ctl->mdata->bw_mode_bitmap;
-
-	if (!((mode & MDSS_MAX_BW_LIMIT_HFLIP) &&
-				(mode & MDSS_MAX_BW_LIMIT_VFLIP)))
-		mode |= mdss_check_for_flip(ctl);
-
-	pr_debug("final mode = %d, bw_mode_bitmap = %d\n", mode,
-			ctl->mdata->bw_mode_bitmap);
-
-	/* Select BW mode with smallest limit */
-	while (mode) {
-		if (mode & BIT(0)) {
-			threshold = max_bw_settings[i].mdss_max_bw_val;
-			if (threshold < max)
-				max = threshold;
-		}
-		mode >>= 1;
-		i++;
-	}
-
-	return max;
-}
-
 int mdss_mdp_perf_bw_check(struct mdss_mdp_ctl *ctl,
 		struct mdss_mdp_pipe **left_plist, int left_cnt,
 		struct mdss_mdp_pipe **right_plist, int right_cnt)
 {
 	struct mdss_data_type *mdata = ctl->mdata;
 	struct mdss_mdp_perf_params perf;
-	u32 bw, threshold, max_bw;
+	u32 bw, threshold;
 
 	/* we only need bandwidth check on real-time clients (interfaces) */
 	if (ctl->intf_type == MDSS_MDP_NO_INTF)
@@ -1008,14 +956,6 @@ int mdss_mdp_perf_bw_check(struct mdss_mdp_ctl *ctl,
 	pr_debug("calculated bandwidth=%uk\n", bw);
 
 	threshold = ctl->is_video_mode ? mdata->max_bw_low : mdata->max_bw_high;
-
-	max_bw = mdss_mdp_set_threshold_max_bandwidth(ctl);
-
-	if (max_bw && (max_bw < threshold))
-		threshold = max_bw;
-
-	pr_debug("final threshold bw limit = %d\n", threshold);
-
 	if (bw > threshold) {
 		pr_debug("exceeds bandwidth: %ukb > %ukb\n", bw, threshold);
 		return -E2BIG;
@@ -1791,6 +1731,8 @@ static inline int mdss_mdp_set_split_ctl(struct mdss_mdp_ctl *ctl,
 		struct mdss_mdp_ctl *split_ctl)
 {
 	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
+	struct mdss_panel_info *pinfo;
+
 
 	if (!ctl || !split_ctl || !mdata)
 		return -ENODEV;
@@ -1798,6 +1740,11 @@ static inline int mdss_mdp_set_split_ctl(struct mdss_mdp_ctl *ctl,
 	/* setup split ctl mixer as right mixer of original ctl so that
 	 * original ctl can work the same way as dual pipe solution */
 	ctl->mixer_right = split_ctl->mixer_left;
+	pinfo = &ctl->panel_data->panel_info;
+
+	/* add x offset from left ctl's border */
+	split_ctl->border_x_off += (pinfo->lcdc.border_left +
+					pinfo->lcdc.border_right);
 
 	return 0;
 }
@@ -1868,9 +1815,9 @@ static inline u32 get_panel_width(struct mdss_mdp_ctl *ctl)
 {
 	u32 width;
 
-	width = ctl->panel_data->panel_info.xres;
-	width += (ctl->panel_data->next && is_split_dst(ctl->mfd)) ?
-			ctl->panel_data->next->panel_info.xres : 0;
+	width = get_panel_xres(&ctl->panel_data->panel_info);
+	if (ctl->panel_data->next && is_split_dst(ctl->mfd))
+		width += get_panel_xres(&ctl->panel_data->next->panel_info);
 
 	return width;
 }
@@ -1881,16 +1828,20 @@ int mdss_mdp_ctl_setup(struct mdss_mdp_ctl *ctl)
 	u32 width, height;
 	int split_fb;
 	u32 max_mixer_width;
+	struct mdss_panel_info *pinfo;
 
 	if (!ctl || !ctl->panel_data) {
 		pr_err("invalid ctl handle\n");
 		return -ENODEV;
 	}
 
+	pinfo = &ctl->panel_data->panel_info;
+
 	split_ctl = mdss_mdp_get_split_ctl(ctl);
 
 	width = get_panel_width(ctl);
-	height = ctl->panel_data->panel_info.yres;
+	height = get_panel_yres(pinfo);
+
 	max_mixer_width = ctl->mdata->max_mixer_width;
 
 	split_fb = (ctl->mfd->split_fb_left &&
@@ -1924,10 +1875,13 @@ int mdss_mdp_ctl_setup(struct mdss_mdp_ctl *ctl)
 		}
 	}
 
-	if (split_fb)
+	if (split_fb) {
 		width = ctl->mfd->split_fb_left;
-	else if (width > max_mixer_width)
+		width += (pinfo->lcdc.border_left +
+				pinfo->lcdc.border_right);
+	} else if (width > max_mixer_width) {
 		width /= 2;
+	}
 
 	ctl->mixer_left->width = width;
 	ctl->mixer_left->height = height;
@@ -2026,6 +1980,7 @@ struct mdss_mdp_ctl *mdss_mdp_ctl_init(struct mdss_panel_data *pdata,
 	struct mdss_mdp_ctl *ctl;
 	struct mdss_data_type *mdata = mfd_to_mdata(mfd);
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
+	struct mdss_panel_info *pinfo;
 
 	if (pdata->panel_info.type == WRITEBACK_PANEL)
 		offset = mdss_mdp_get_wb_ctl_support(mdata, false);
@@ -2038,10 +1993,13 @@ struct mdss_mdp_ctl *mdss_mdp_ctl_init(struct mdss_panel_data *pdata,
 		return ERR_PTR(-ENOMEM);
 	}
 
+	pinfo = &pdata->panel_info;
 	ctl->mfd = mfd;
 	ctl->panel_data = pdata;
 	ctl->is_video_mode = false;
 	ctl->perf_release_ctl_bw = false;
+	ctl->border_x_off = pinfo->lcdc.border_left;
+	ctl->border_y_off = pinfo->lcdc.border_top;
 
 	switch (pdata->panel_info.type) {
 	case EDP_PANEL:
@@ -2160,8 +2118,9 @@ int mdss_mdp_ctl_split_display_setup(struct mdss_mdp_ctl *ctl,
 		return -ENODEV;
 	}
 
-	sctl->width = pdata->panel_info.xres;
-	sctl->height = pdata->panel_info.yres;
+	sctl->width = get_panel_xres(&pdata->panel_info);
+	sctl->height = get_panel_yres(&pdata->panel_info);
+
 	sctl->roi = (struct mdss_rect){0, 0, sctl->width, sctl->height};
 
 	ctl->mixer_left = mdss_mdp_mixer_alloc(ctl, MDSS_MDP_MIXER_TYPE_INTF,

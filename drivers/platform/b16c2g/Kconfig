@@ -1,0 +1,24 @@
+# Hisense configuration options
+
+config MACH_HISENSE_SMARTPHONE
+	bool "Hisense device"
+	depends on ARCH_MSM
+	help
+	  Support for Hisense products
+
+config MACH_HISENSE_MSM8909
+	bool "Hisense MSM8909"
+	depends on ARCH_MSM8909
+	select MACH_HISENSE_SMARTPHONE
+	help
+	  Support for MSM8909 Hisense variants
+
+menu "Hisense board selection"
+
+config MACH_BOARD_LU652U
+	bool "LU652U board"
+	select MACH_HISENSE_MSM8909
+	help
+	  Support for Hisense LU652U variant
+
+endmenu

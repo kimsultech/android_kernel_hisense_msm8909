@@ -112,7 +112,6 @@ config ARCH_MSM8909
 	select MSM_BIMC_BWMON
 	select MSM_JTAG_MM if CORESIGHT_ETM
 	select RCU_BOOST if DEBUG_KMEMLEAK
-	select HAS_MACH_MEMUTILS
 
 config ARCH_MSM8916
 	bool "MSM8916"
@@ -1050,49 +1049,5 @@ config FSM9900_GSM_NL
 	  The DIQ functionality is disabled and the UART functionality is enabled.
 	  The serial port connection can be established to communicate with the
 	  GSM NL module.
-
-config HAS_MACH_MEMUTILS
-	default n
-	bool "Motorola MSM memcpy enhancements"
-	help
-	Faster memcpy performance for Krait
-
-# Begin add by wenzhao.guo on 12.09.2014
-
-config JRD_BUTTON_LOG_TIMESTAMP
-
-        bool "JRD_BUTTON_LOG_TIMESTAMP"
-
-
-
-config JRD_BUTTON_LOG_BOOT
-
-        bool "JRD_BUTTON_LOG_BOOT"
-
-
-
-config JRD_BUTTON_LOG_PANIC
-
-        bool "JRD_BUTTON_LOG_PANIC"
-
-
-
-config JRD_BUTTON_RAMCONSOLE_WDT
-
-        bool "JRD_BUTTON_RAMCONSOLE_WDT"
-
-
-
-config JRD_BUTTON_LOG_POWERUP
-
-        bool "JRD_BUTTON_LOG_POWERUP"
-
-
-
-config JRD_BUTTON_PRINTK
-
-        bool "JRD_BUTTON_PRINTK"
-
-# End add by wenzhao.guo on 12.09.2014
 
 endif

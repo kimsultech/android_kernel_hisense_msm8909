@@ -25,29 +25,11 @@
 #include <linux/bitops.h>
 #include <linux/leds.h>
 #include <linux/debugfs.h>
-/*[PLATFORM]-Add-BEGIN by TCTSZ.leo.guo, 2015/07/20, add battery temperature protection*/
-#include <linux/spinlock.h>
-#include <linux/wakelock.h>
-#include <linux/delay.h>
-/* [PLATFORM]-Mod-END by TCTSZ.leo.guo */
-
-/*[PLATFORM]-Add-BEGIN by TCTSZ.leo.guo, 2015/07/20, add battery temperature protection*/
-#if (defined CONFIG_TCT_8909_COMMON)
-#include <linux/uaccess.h>
-//#define QPNP_NTC_DEBUG_SIMULATE
-#endif
-/* [PLATFORM]-Mod-END by TCTSZ.leo.guo */
 
 #define CREATE_MASK(NUM_BITS, POS) \
 	((unsigned char) (((1 << (NUM_BITS)) - 1) << (POS)))
 #define LBC_MASK(MSB_BIT, LSB_BIT) \
 	CREATE_MASK(MSB_BIT - LSB_BIT + 1, LSB_BIT)
-
-#if defined(CONFIG_TCT_8909_PIXI355) || defined(CONFIG_TCT_8909_PIXI35) || defined(CONFIG_TCT_8909_PIXI445_TF)
-#define JRD_CHARGING_POLICY_FOR_PIXI355
-#define JRD_CHECK_CHARGING_FULL_FOR_PIXI355
-//#define JRD_BATTERY_ID_CHECK_FOR_PIXI355
-#endif
 
 /* Interrupt offsets */
 #define INT_RT_STS_REG				0x10
@@ -58,8 +40,15 @@
 
 /* USB CHARGER PATH peripheral register offsets */
 #define USB_IN_VALID_MASK			BIT(1)
+#define CHG_GONE_BIT				BIT(2)
 #define USB_SUSP_REG				0x47
 #define USB_SUSPEND_BIT				BIT(0)
+#define USB_COMP_OVR1_REG			0xEA
+#define USBIN_LLIMIT_OK_MASK			LBC_MASK(1, 0)
+#define USBIN_LLIMIT_OK_NO_OVERRIDE		0x00
+#define USBIN_LLIMIT_OK_OVERRIDE_1		0x03
+#define USB_OVP_TST5_REG			0xE7
+#define CHG_GONE_OK_EN_BIT			BIT(2)
 
 /* CHARGER peripheral register offset */
 #define CHG_OPTION_REG				0x08
@@ -89,6 +78,8 @@
 #define CHG_PERPH_RESET_CTRL3_REG		0xDA
 #define CHG_COMP_OVR1				0xEE
 #define CHG_VBAT_DET_OVR_MASK			LBC_MASK(1, 0)
+#define CHG_TEST_LOOP_REG			0xE5
+#define VIN_MIN_LOOP_DISABLE_BIT		BIT(0)
 #define OVERRIDE_0				0x2
 #define OVERRIDE_NONE				0x0
 
@@ -132,49 +123,11 @@
 #define LBC_MISC_SUBTYPE			0x18
 
 #define QPNP_CHG_I_MAX_MIN_90                   90
-#define QPNP_CHG_I_MAX_MIN_550                  550
-
-#if defined(CONFIG_TCT_BATT_ID_SUPPORT)
-#define BATTERY_A_ID_MIN_UV    1000000
-#define BATTERY_A_ID_MAX_UV	   1400000
-
-#define BATTERY_B_ID_MIN_UV    150000
-#define BATTERY_B_ID_MAX_UV	   450000
-#endif
 
 /* Feature flags */
 #define VDD_TRIM_SUPPORTED			BIT(0)
 
 #define QPNP_CHARGER_DEV_NAME	"qcom,qpnp-linear-charger"
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-/* description: flag to mark whether charged full.
- * @ever_full_flag:
- * 	true: ever charge full, and usb is always in until now;
- * 	false: usb in NOT in, or never charge full.
- */
-static bool ever_full_flag = false;
-static bool charging_flag = false;
-
-static void batt_charging_delay(struct work_struct *work);
-static DECLARE_DELAYED_WORK(charging_flag_work, batt_charging_delay);
-static void batt_charging_delay(struct work_struct *work)
-{
-	charging_flag = true;
-	pr_debug("set charging_flag true after charging 60 seconds\n");
-}
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
-
-/*[PLATFORM]-Add-BEGIN by TCTSZ.leo.guo, 2015/07/20, add battery status debug message*/
-#if (defined CONFIG_QPNP_BATT_STATUS_DEBUG)
-#include <linux/time.h>
-#include <linux/rtc.h>
-#define INFO(fmt, args...) printk(KERN_CRIT fmt "\n" , ## args)
-#else
-#define INFO(fmt, args...) do { } while (0)
-#endif
-/*[PLATFORM]-Add-END by TCTSZ.leo.guo*/
 
 /* usb_interrupts */
 
@@ -203,9 +156,7 @@ enum {
 	CURRENT = BIT(2),
 	SOC	= BIT(3),
 	PARALLEL = BIT(4),
-#if defined(CONFIG_TCT_BATT_ID_SUPPORT) || defined(CONFIG_TCT_8909_PIXI384G)
-	BATT_ID = BIT(5),
-#endif
+	COLLAPSE = BIT(5),
 };
 
 enum bpd_type {
@@ -256,32 +207,6 @@ static enum power_supply_property msm_batt_power_props[] = {
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_TEMP,
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#ifdef CONFIG_TCT_8909_PIXI37
-	POWER_SUPPLY_PROP_OVERHEAT_TEMP,
-	POWER_SUPPLY_PROP_COLD_TEMP,
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-	POWER_SUPPLY_PROP_BATT_STATUS,
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-
-#ifdef JRD_CHECK_CHARGING_FULL_FOR_PIXI355
-	POWER_SUPPLY_PROP_BATT_STATUS,
-#endif
-
-#ifdef CONFIG_TCT_8909_PIXI384G
-	POWER_SUPPLY_PROP_OVERHEAT_TEMP,
-	POWER_SUPPLY_PROP_COLD_TEMP,
-#endif
-
-#ifdef JRD_CHARGING_POLICY_FOR_PIXI355
-	POWER_SUPPLY_PROP_OVERHEAT_TEMP,
-	POWER_SUPPLY_PROP_OVER_42_TEMP,
-	POWER_SUPPLY_PROP_OVER_37_TEMP,
-	POWER_SUPPLY_PROP_COLD_TEMP,
-#endif
-
 	POWER_SUPPLY_PROP_COOL_TEMP,
 	POWER_SUPPLY_PROP_WARM_TEMP,
 	POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL,
@@ -357,6 +282,7 @@ struct vddtrim_map vddtrim_map[] = {
  * @cfg_charger_detect_eoc:	charger can detect end of charging
  * @cfg_disable_vbatdet_based_recharge:	keep VBATDET comparator overriden to
  *				low and VBATDET irq disabled.
+ * @cfg_collapsible_chgr_support: support collapsible charger
  * @cfg_chgr_led_support:	support charger led work.
  * @cfg_safe_current:		battery safety current setting
  * @cfg_hot_batt_p:		hot battery threshold setting
@@ -398,20 +324,6 @@ struct qpnp_lbc_chip {
 	u16				bat_if_base;
 	u16				usb_chgpth_base;
 	u16				misc_base;
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	bool				bat_is_cold;
-	bool				bat_is_overheat;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-
-#ifdef JRD_CHARGING_POLICY_FOR_PIXI355
-	bool                            bat_is_cold;
-	bool                            bat_is_over_42;
-	bool                            bat_is_over_37;
-	bool                            bat_is_overheat;
-#endif
-
 	bool				bat_is_cool;
 	bool				bat_is_warm;
 	bool				chg_done;
@@ -423,7 +335,7 @@ struct qpnp_lbc_chip {
 	bool				fastchg_on;
 	bool				cfg_use_external_charger;
 	bool				cfg_chgr_led_support;
-	bool                cfg_bms_controlled_charging;
+	bool				non_collapsible_chgr_detected;
 	unsigned int			cfg_warm_bat_chg_ma;
 	unsigned int			cfg_cool_bat_chg_ma;
 	unsigned int			cfg_safe_voltage_mv;
@@ -432,6 +344,7 @@ struct qpnp_lbc_chip {
 	unsigned int			cfg_charger_detect_eoc;
 	unsigned int			cfg_disable_vbatdet_based_recharge;
 	unsigned int			cfg_batt_weak_voltage_uv;
+	unsigned int			cfg_collapsible_chgr_support;
 	unsigned int			cfg_warm_bat_mv;
 	unsigned int			cfg_cool_bat_mv;
 	unsigned int			cfg_hot_batt_p;
@@ -445,20 +358,6 @@ struct qpnp_lbc_chip {
 	unsigned int			supported_feature_flag;
 	int				cfg_bpd_detection;
 	int				cfg_warm_bat_decidegc;
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	int				cfg_overheat_bat_decidegc;
-	int				cfg_cold_bat_decidegc;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-
-#ifdef JRD_CHARGING_POLICY_FOR_PIXI355
-	int             cfg_overheat_bat_decidegc;
-	int             cfg_over_42_bat_decidegc;
-	int             cfg_over_37_bat_decidegc;
-	int             cfg_cold_bat_decidegc;
-#endif
-
 	int				cfg_cool_bat_decidegc;
 	int				fake_battery_soc;
 	int				cfg_soc_resume_limit;
@@ -468,6 +367,7 @@ struct qpnp_lbc_chip {
 	int				usb_psy_ma;
 	int				delta_vddmax_uv;
 	int				init_trim_uv;
+	struct delayed_work		collapsible_detection_work;
 
 	/* parallel-chg params */
 	int				parallel_charging_enabled;
@@ -488,46 +388,13 @@ struct qpnp_lbc_chip {
 	struct qpnp_adc_tm_btm_param	adc_param;
 	struct qpnp_vadc_chip		*vadc_dev;
 	struct qpnp_adc_tm_chip		*adc_tm_dev;
-/* [PLATFORM]-Mod-BEGIN by TCTNB.YQJ, PR-878278, 2015/01/16, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_POP3
-	struct delayed_work			power_supply_change_work;
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.YQJ */
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, CR-1007809, 2015/06/02, add power off condition */
-#ifdef CONFIG_TCT_8909_COMMON
-	struct delayed_work			low_voltage_detect_work;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-	struct work_struct			ever_full_flag_work;
-	struct alarm				ever_full_flag_alarm;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-	struct delayed_work			batt_id_detect_work;
-#endif
 	struct led_classdev		led_cdev;
 	struct dentry			*debug_root;
-
-	/*[PLATFORM]-Add-BEGIN by TCTSZ.leo.guo, 2015/05/12, add battery status debug message*/
-	#ifdef CONFIG_QPNP_BATT_STATUS_DEBUG
-		int index;
-		struct delayed_work monitor_workqueue;
-		struct wake_lock	monitor_wake_lock;
-	#endif
-	/*[PLATFORM]-Add-END by TCTSZ.leo.guo*/
 
 	/* parallel-chg params */
 	struct power_supply		parallel_psy;
 	struct delayed_work		parallel_work;
 };
-
-#if defined(CONFIG_TCT_BATT_ID_SUPPORT)
-static int64_t qpnp_lbc_get_battery_id(struct qpnp_lbc_chip *chip);
-static int qpnp_lbc_charger_enable(struct qpnp_lbc_chip *chip, int reason,
-					int enable);
-#endif
 
 static void qpnp_lbc_enable_irq(struct qpnp_lbc_chip *chip,
 					struct qpnp_lbc_irq *irq)
@@ -782,6 +649,24 @@ static int qpnp_lbc_is_usb_chg_plugged_in(struct qpnp_lbc_chip *chip)
 	return (usbin_valid_rt_sts & USB_IN_VALID_MASK) ? 1 : 0;
 }
 
+static int qpnp_lbc_is_chg_gone(struct qpnp_lbc_chip *chip)
+{
+	u8 rt_sts;
+	int rc;
+
+	rc = qpnp_lbc_read(chip, chip->usb_chgpth_base + INT_RT_STS_REG,
+				&rt_sts, 1);
+	if (rc) {
+		pr_err("spmi read failed: addr=0x%04x, rc=%d\n",
+				chip->usb_chgpth_base + INT_RT_STS_REG, rc);
+		return rc;
+	}
+
+	pr_debug("rt_sts 0x%x\n", rt_sts);
+
+	return (rt_sts & CHG_GONE_BIT) ? 1 : 0;
+}
+
 static int qpnp_lbc_charger_enable(struct qpnp_lbc_chip *chip, int reason,
 					int enable)
 {
@@ -861,6 +746,75 @@ static int qpnp_lbc_bat_if_configure_btc(struct qpnp_lbc_chip *chip)
 		pr_err("Failed to configure BTC rc=%d\n", rc);
 
 	return rc;
+}
+
+static int qpnp_chg_collapsible_chgr_config(struct qpnp_lbc_chip *chip,
+		bool enable)
+{
+	u8 reg_val;
+	int rc;
+
+	pr_debug("Configure for %scollapsible charger\n",
+			enable ? "" : "non-");
+	/*
+	 * The flow to enable/disable the collapsible charger configuration:
+	 *	Enable:  Override USBIN_LLIMIT_OK -->
+	 *		 Disable VIN_MIN comparator -->
+	 *		 Enable CHG_GONE comparator
+	 *	Disable: Enable VIN_MIN comparator -->
+	 *		 Enable USBIN_LLIMIT_OK -->
+	 *		 Disable CHG_GONE comparator
+	 */
+	if (enable) {
+		/* Override USBIN_LLIMIT_OK */
+		reg_val = USBIN_LLIMIT_OK_OVERRIDE_1;
+		rc = __qpnp_lbc_secure_masked_write(chip->spmi,
+				chip->usb_chgpth_base,
+				USB_COMP_OVR1_REG,
+				USBIN_LLIMIT_OK_MASK, reg_val);
+		if (rc) {
+			pr_err("Failed to override USB_LLIMIT_OK rc = %d\n",
+							rc);
+			return rc;
+		}
+	}
+
+	/* Configure VIN_MIN comparator */
+	rc = __qpnp_lbc_secure_masked_write(chip->spmi,
+			chip->chgr_base, CHG_TEST_LOOP_REG,
+			VIN_MIN_LOOP_DISABLE_BIT,
+			enable ? VIN_MIN_LOOP_DISABLE_BIT : 0);
+	if (rc) {
+		pr_err("Failed to %s VIN_MIN comparator rc = %d\n",
+				enable ? "disable" : "enable", rc);
+		return rc;
+	}
+
+	if (!enable) {
+		/* Enable USBIN_LLIMIT_OK */
+		reg_val = USBIN_LLIMIT_OK_NO_OVERRIDE;
+		rc = __qpnp_lbc_secure_masked_write(chip->spmi,
+				chip->usb_chgpth_base,
+				USB_COMP_OVR1_REG,
+				USBIN_LLIMIT_OK_MASK, reg_val);
+		if (rc) {
+			pr_err("Failed to override USB_LLIMIT_OK rc = %d\n",
+							rc);
+			return rc;
+		}
+	}
+
+	/* Configure CHG_GONE comparator */
+	reg_val = enable ? CHG_GONE_OK_EN_BIT : 0;
+	rc = __qpnp_lbc_secure_masked_write(chip->spmi,
+			chip->usb_chgpth_base, USB_OVP_TST5_REG,
+			CHG_GONE_OK_EN_BIT, reg_val);
+	if (rc) {
+		pr_err("Failed to write CHG_GONE comparator rc = %d\n", rc);
+		return rc;
+	}
+
+	return 0;
 }
 
 #define QPNP_LBC_VBATWEAK_MIN_UV        3000000
@@ -975,12 +929,6 @@ static int qpnp_lbc_set_appropriate_vddmax(struct qpnp_lbc_chip *chip)
 {
 	int rc;
 
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	if (chip->bat_is_warm)
-		rc = qpnp_lbc_vddmax_set(chip, chip->cfg_warm_bat_mv);
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 	if (chip->bat_is_cool)
 		rc = qpnp_lbc_vddmax_set(chip, chip->cfg_cool_bat_mv);
 	else if (chip->bat_is_warm)
@@ -1193,6 +1141,7 @@ led_brightness qpnp_lbc_chgr_led_brightness_get(struct led_classdev *cdev)
 static int qpnp_lbc_register_chgr_led(struct qpnp_lbc_chip *chip)
 {
 	int rc;
+
 	chip->led_cdev.name = "red";
 	chip->led_cdev.brightness_set = qpnp_lbc_chgr_led_brightness_set;
 	chip->led_cdev.brightness_get = qpnp_lbc_chgr_led_brightness_get;
@@ -1297,19 +1246,10 @@ static int get_prop_batt_health(struct qpnp_lbc_chip *chip)
 		return POWER_SUPPLY_HEALTH_UNKNOWN;
 	}
 
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G || defined JRD_CHARGING_POLICY_FOR_PIXI355)
-	if ((BATT_TEMP_HOT_MASK & reg_val) || chip->bat_is_overheat)
-		return POWER_SUPPLY_HEALTH_OVERHEAT;
-	if ((!(BATT_TEMP_COLD_MASK & reg_val) && get_prop_batt_present(chip)) || chip->bat_is_cold)
-		return POWER_SUPPLY_HEALTH_COLD;
-#else
 	if (BATT_TEMP_HOT_MASK & reg_val)
 		return POWER_SUPPLY_HEALTH_OVERHEAT;
 	if (!(BATT_TEMP_COLD_MASK & reg_val))
 		return POWER_SUPPLY_HEALTH_COLD;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 	if (chip->bat_is_cool)
 		return POWER_SUPPLY_HEALTH_COOL;
 	if (chip->bat_is_warm)
@@ -1379,7 +1319,7 @@ static int get_prop_current_now(struct qpnp_lbc_chip *chip)
 static int get_prop_capacity(struct qpnp_lbc_chip *chip)
 {
 	union power_supply_propval ret = {0,};
-	int soc, battery_status, charger_in;
+	int soc;
 
 	if (chip->fake_battery_soc >= 0)
 		return chip->fake_battery_soc;
@@ -1390,33 +1330,6 @@ static int get_prop_capacity(struct qpnp_lbc_chip *chip)
 	if (chip->bms_psy) {
 		chip->bms_psy->get_property(chip->bms_psy,
 				POWER_SUPPLY_PROP_CAPACITY, &ret);
-		mutex_lock(&chip->chg_enable_lock);
-		if (chip->chg_done)
-			chip->bms_psy->get_property(chip->bms_psy,
-					POWER_SUPPLY_PROP_CAPACITY, &ret);
-		battery_status = get_prop_batt_status(chip);
-		charger_in = qpnp_lbc_is_usb_chg_plugged_in(chip);
-
-		/* reset chg_done flag if capacity not 100% */
-		if (ret.intval < 100 && chip->chg_done) {
-			chip->chg_done = false;
-			power_supply_changed(&chip->batt_psy);
-		}
-
-		if (battery_status != POWER_SUPPLY_STATUS_CHARGING
-				&& charger_in
-				&& !chip->cfg_charging_disabled
-				&& chip->cfg_soc_resume_limit
-				&& ret.intval <= chip->cfg_soc_resume_limit
-				&& !chip->cfg_bms_controlled_charging) {
-			pr_debug("resuming charging at %d%% soc\n",
-					ret.intval);
-			if (!chip->cfg_disable_vbatdet_based_recharge)
-				qpnp_lbc_vbatdet_override(chip, OVERRIDE_0);
-				qpnp_lbc_charger_enable(chip, SOC, 1);
-			}
-		mutex_unlock(&chip->chg_enable_lock);
-
 		soc = ret.intval;
 		if (soc == 0) {
 			if (!qpnp_lbc_is_usb_chg_plugged_in(chip))
@@ -1459,13 +1372,6 @@ static void qpnp_lbc_set_appropriate_current(struct qpnp_lbc_chip *chip)
 {
 	unsigned int chg_current = chip->usb_psy_ma;
 
-#if defined (JRD_CHARGING_POLICY_FOR_PIXI355)
-	if ((chip->bat_is_over_37) && chip->cfg_cool_bat_chg_ma)
-		chg_current = min(chg_current, chip->cfg_cool_bat_chg_ma);
-	if ((chip->bat_is_over_42) && chip->cfg_warm_bat_chg_ma)
-		chg_current = min(chg_current, chip->cfg_warm_bat_chg_ma);
-#endif
-
 	if (chip->bat_is_cool && chip->cfg_cool_bat_chg_ma)
 		chg_current = min(chg_current, chip->cfg_cool_bat_chg_ma);
 	if (chip->bat_is_warm && chip->cfg_warm_bat_chg_ma)
@@ -1495,29 +1401,6 @@ static void qpnp_batt_external_power_changed(struct power_supply *psy)
 				POWER_SUPPLY_PROP_CURRENT_MAX, &ret);
 		current_ma = ret.intval / 1000;
 
-	#if 0 //defined(CONFIG_TCT_SUPPORT_NONSTANDARD_CHARGE)
-		chip->usb_psy->get_property(chip->usb_psy,
-				POWER_SUPPLY_PROP_ONLINE, &ret);
-		//printk(KERN_WARNING ">>MC<< usb online:%d.\n", ret.intval);
-		// Plug-in non-standard charger after boot up complete, ret.intval was 0.
-		if (current_ma <= 2 && !chip->cfg_use_fake_battery
-				&& get_prop_batt_present(chip) /*&& (ret.intval==1)*/)
-		{
-		#if 0
-			chip->usb_psy->get_property(chip->usb_psy,
-					POWER_SUPPLY_PROP_TYPE, &ret);
-			printk(KERN_WARNING ">>MC<< usb type:%d.\n", ret.intval);
-			printk(KERN_WARNING ">>MC<< usb current:%d.prev_max_ma:%d.\n", current_ma, chip->prev_max_ma);
-		#endif
-
-			chip->usb_psy_ma = QPNP_CHG_I_MAX_MIN_550;
-			qpnp_lbc_set_appropriate_current(chip);
-			qpnp_lbc_charger_enable(chip, CURRENT, 1);
-
-			goto skip_current_config;
-		}
-	#endif
-
 		if (current_ma == chip->prev_max_ma)
 			goto skip_current_config;
 
@@ -1527,24 +1410,8 @@ static void qpnp_batt_external_power_changed(struct power_supply *psy)
 			qpnp_lbc_charger_enable(chip, CURRENT, 0);
 			chip->usb_psy_ma = QPNP_CHG_I_MAX_MIN_90;
 			qpnp_lbc_set_appropriate_current(chip);
-		}
-	#if defined(FEATURE_TCTNB_MMITEST) \
-		&& (defined(CONFIG_TCT_8909_PIXI35) || defined(CONFIG_TCT_8909_PIXI355) || defined(CONFIG_TCT_8909_PIXI445))
-		// Pmic charging current can't control when there was no thermal resistance
-		// So stop charging in mmitest
-		else if(chip->cfg_use_fake_battery || !get_prop_batt_present(chip))
-		{
-			qpnp_lbc_charger_enable(chip, CURRENT, 0);
-			chip->usb_psy_ma = QPNP_CHG_I_MAX_MIN_550;
-			qpnp_lbc_set_appropriate_current(chip);
-		}
-	#endif
-		else {
-        #ifdef CONFIG_TCT_8909_PIXI35
-            chip->usb_psy_ma = QPNP_CHG_I_MAX_MIN_550;
-        #else
+		} else {
 			chip->usb_psy_ma = current_ma;
-		#endif
 			qpnp_lbc_set_appropriate_current(chip);
 			qpnp_lbc_charger_enable(chip, CURRENT, 1);
 		}
@@ -1616,202 +1483,6 @@ out:
 #define MAX_WARM_TEMP		1000
 #define HYSTERISIS_DECIDEGC	20
 
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-static int qpnp_lbc_configure_jeita(struct qpnp_lbc_chip *chip,
-			enum power_supply_property psp, int temp_degc)
-{
-	int rc = 0;
-
-	if ((temp_degc < MIN_COOL_TEMP) || (temp_degc > MAX_WARM_TEMP)) {
-		pr_err("Bad temperature request %d\n", temp_degc);
-		return -EINVAL;
-	}
-
-	mutex_lock(&chip->jeita_configure_lock);
-	switch (psp) {
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-		if (temp_degc >= chip->cfg_cool_bat_decidegc) {
-			pr_err("Can't set cold %d higher than cool %d\n",
-					temp_degc,
-					chip->cfg_cool_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_cold)
-			chip->adc_param.high_temp =
-				temp_degc;
-		else if (chip->bat_is_cool)
-			chip->adc_param.low_temp = temp_degc;
-
-		chip->cfg_cold_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_COOL_TEMP:
-		if (temp_degc >= chip->cfg_warm_bat_decidegc) {
-			pr_err("Can't set cool %d higher than warm %d\n",
-					temp_degc, chip->cfg_warm_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_cool)
-			chip->adc_param.high_temp = temp_degc;
-		else if (!chip->bat_is_cold && !chip->bat_is_cool && !chip->bat_is_warm && !chip->bat_is_overheat)
-			chip->adc_param.low_temp = temp_degc;
-
-		chip->cfg_cool_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_WARM_TEMP:
-		if (temp_degc >= chip->cfg_overheat_bat_decidegc) {
-			pr_err("Can't set warm %d higher than overheat %d\n",
-					temp_degc, chip->cfg_overheat_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_warm)
-			chip->adc_param.low_temp = temp_degc;
-		else if (!chip->bat_is_overheat && !chip->bat_is_cold && !chip->bat_is_warm && !chip->bat_is_cool)
-			chip->adc_param.high_temp = temp_degc;
-		chip->cfg_warm_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-		if (temp_degc <= chip->cfg_warm_bat_decidegc + 40) {
-			pr_err("Can't set overheat %d lower than warm %d + 40\n",
-					temp_degc, chip->cfg_warm_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_overheat)
-			chip->adc_param.low_temp = temp_degc - 40;
-		else if (chip->bat_is_warm) {
-			chip->adc_param.low_temp = chip->cfg_warm_bat_decidegc;
-			chip->adc_param.high_temp = temp_degc;
-		}
-		chip->cfg_overheat_bat_decidegc = temp_degc;
-		break;
-	default:
-		rc = -EINVAL;
-		goto mutex_unlock;
-	}
-
-	if (qpnp_adc_tm_channel_measure(chip->adc_tm_dev, &chip->adc_param))
-		pr_err("request ADC error\n");
-
-mutex_unlock:
-	mutex_unlock(&chip->jeita_configure_lock);
-	return rc;
-}
-#elif (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-static int qpnp_lbc_configure_jeita(struct qpnp_lbc_chip *chip,
-					enum power_supply_property psp, int temp_degc)
-{
-	int rc = 0;
-
-	if ((temp_degc < MIN_COOL_TEMP) || (temp_degc > MAX_WARM_TEMP)) {
-		pr_err("Bad temperature request %d\n", temp_degc);
-		return -EINVAL;
-	}
-
-	mutex_lock(&chip->jeita_configure_lock);
-
-	switch (psp) {
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-		if (temp_degc >= chip->cfg_cool_bat_decidegc) {
-			pr_err("Can't set cold %d higher than cool %d\n",
-					temp_degc,
-					chip->cfg_cool_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_cold)
-			chip->adc_param.high_temp = temp_degc + 10;
-		else if (chip->bat_is_cool)
-			chip->adc_param.low_temp = temp_degc;
-
-		chip->cfg_cold_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_COOL_TEMP:
-		if (temp_degc >= chip->cfg_over_37_bat_decidegc - 10 || temp_degc <= chip->cfg_cold_bat_decidegc) {
-			pr_err("Can't set cool %d higher than over37 %d - 10 or lower than cold %d\n",
-					temp_degc, chip->cfg_over_37_bat_decidegc, chip->cfg_cold_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_cool)
-			chip->adc_param.high_temp = temp_degc + 10;
-		else if (!chip->bat_is_cold && !chip->bat_is_over_37 && !chip->bat_is_over_42 && !chip->bat_is_warm && !chip->bat_is_overheat)
-			chip->adc_param.low_temp = temp_degc;
-
-		chip->cfg_cool_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_OVER_37_TEMP:
-		if (temp_degc >= chip->cfg_over_42_bat_decidegc - 30 || temp_degc <= chip->cfg_cool_bat_decidegc + 10) {
-			pr_err("Can't set over37 %d higher than over42 %d - 30 or lower than cool %d + 10\n",
-					temp_degc, chip->cfg_over_42_bat_decidegc, chip->cfg_cool_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_over_37)
-			chip->adc_param.low_temp = temp_degc - 10;
-		else if (!chip->bat_is_overheat && !chip->bat_is_cold && !chip->bat_is_over_42 && !chip->bat_is_warm && !chip->bat_is_cool)
-			chip->adc_param.high_temp = temp_degc + 10;
-
-		chip->cfg_over_37_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_OVER_42_TEMP:
-		if (temp_degc >= chip->cfg_warm_bat_decidegc - 20 || temp_degc <= chip->cfg_over_37_bat_decidegc + 30) {
-			pr_err("Can't set over42 %d higher than warm %d - 20 or lower than over37 %d + 30\n",
-					temp_degc, chip->cfg_warm_bat_decidegc, chip->cfg_over_37_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_over_42)
-			chip->adc_param.low_temp = temp_degc - 30;
-		else if (chip->bat_is_over_37)
-			chip->adc_param.high_temp = temp_degc + 10;
-
-		chip->cfg_over_42_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_WARM_TEMP:
-		if (temp_degc >= chip->cfg_overheat_bat_decidegc - 40 || temp_degc <= chip->cfg_over_42_bat_decidegc + 20) {
-			pr_err("Can't set warm %d higher than overheat %d - 40 or lower than over42 %d + 20\n",
-					temp_degc, chip->cfg_overheat_bat_decidegc, chip->cfg_over_42_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_warm)
-			chip->adc_param.low_temp = temp_degc - 20;
-		else if (chip->bat_is_over_42)
-			chip->adc_param.high_temp = temp_degc + 10;
-
-		chip->cfg_warm_bat_decidegc = temp_degc;
-		break;
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-		if (temp_degc <= chip->cfg_warm_bat_decidegc + 40) {
-			pr_err("Can't set overheat %d lower than warm %d + 10\n",
-				temp_degc, chip->cfg_warm_bat_decidegc);
-			rc = -EINVAL;
-			goto mutex_unlock;
-		}
-		if (chip->bat_is_overheat)
-			chip->adc_param.low_temp = temp_degc - 50;
-		else if (chip->bat_is_warm)
-			chip->adc_param.high_temp = temp_degc;
-
-		chip->cfg_overheat_bat_decidegc = temp_degc;
-		break;
-	default:
-		rc = -EINVAL;
-		goto mutex_unlock;
-	}
-
-	if (qpnp_adc_tm_channel_measure(chip->adc_tm_dev, &chip->adc_param))
-		pr_err("request ADC error\n");
-
-mutex_unlock:
-	mutex_unlock(&chip->jeita_configure_lock);
-	return rc;
-}
-#else
 static int qpnp_lbc_configure_jeita(struct qpnp_lbc_chip *chip,
 			enum power_supply_property psp, int temp_degc)
 {
@@ -1872,8 +1543,6 @@ mutex_unlock:
 	mutex_unlock(&chip->jeita_configure_lock);
 	return rc;
 }
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 
 static int qpnp_batt_property_is_writeable(struct power_supply *psy,
 					enum power_supply_property psp)
@@ -1882,18 +1551,6 @@ static int qpnp_batt_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_STATUS:
 	case POWER_SUPPLY_PROP_CAPACITY:
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-#if (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-	case POWER_SUPPLY_PROP_OVER_37_TEMP:
-	case POWER_SUPPLY_PROP_OVER_42_TEMP:
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-#endif
 	case POWER_SUPPLY_PROP_COOL_TEMP:
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 	case POWER_SUPPLY_PROP_WARM_TEMP:
@@ -1940,8 +1597,10 @@ static int qpnp_batt_power_set_property(struct power_supply *psy,
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		mutex_lock(&chip->chg_enable_lock);
-		if (val->intval == POWER_SUPPLY_STATUS_FULL &&
-				!chip->cfg_float_charge) {
+		switch (val->intval) {
+		case POWER_SUPPLY_STATUS_FULL:
+			if (chip->cfg_float_charge)
+				break;
 			/* Disable charging */
 			rc = qpnp_lbc_charger_enable(chip, SOC, 0);
 			if (rc)
@@ -1966,25 +1625,22 @@ static int qpnp_batt_power_set_property(struct power_supply *psy,
 					qpnp_lbc_enable_irq(chip,
 						&chip->irqs[CHG_VBAT_DET_LO]);
 			}
-		}
-		if (chip->cfg_bms_controlled_charging) {
-			switch (val->intval) {
-			case POWER_SUPPLY_STATUS_CHARGING:
-				chip->chg_done = false;
-				pr_debug("resuming charging by bms\n");
-				if (!chip->cfg_disable_vbatdet_based_recharge)
-					qpnp_lbc_vbatdet_override(chip, OVERRIDE_0);
+			break;
+		case POWER_SUPPLY_STATUS_CHARGING:
+			chip->chg_done = false;
+			pr_debug("resuming charging by bms\n");
+			if (!chip->cfg_disable_vbatdet_based_recharge)
+				qpnp_lbc_vbatdet_override(chip, OVERRIDE_0);
 
-				qpnp_lbc_charger_enable(chip, SOC, 1);
-				break;
-			case POWER_SUPPLY_STATUS_DISCHARGING:
-				chip->chg_done = false;
-				pr_debug("status = DISCHARGING chg_done = %d\n",
-							chip->chg_done);
-				break;
-			default:
-				break;
-			}
+			qpnp_lbc_charger_enable(chip, SOC, 1);
+			break;
+		case POWER_SUPPLY_STATUS_DISCHARGING:
+			chip->chg_done = false;
+			pr_debug("status = DISCHARGING chg_done = %d\n",
+					chip->chg_done);
+			break;
+		default:
+			break;
 		}
 		mutex_unlock(&chip->chg_enable_lock);
 		break;
@@ -1994,30 +1650,6 @@ static int qpnp_batt_power_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_WARM_TEMP:
 		rc = qpnp_lbc_configure_jeita(chip, psp, val->intval);
 		break;
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-		rc = qpnp_lbc_configure_jeita(chip, psp, val->intval);
-		break;
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-		rc = qpnp_lbc_configure_jeita(chip, psp, val->intval);
-		break;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-#if (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-		rc = qpnp_lbc_configure_jeita(chip, psp, val->intval);
-		break;
-	case POWER_SUPPLY_PROP_OVER_37_TEMP:
-		rc = qpnp_lbc_configure_jeita(chip, psp, val->intval);
-		break;
-	case POWER_SUPPLY_PROP_OVER_42_TEMP:
-		rc = qpnp_lbc_configure_jeita(chip, psp, val->intval);
-		break;
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-		rc = qpnp_lbc_configure_jeita(chip, psp, val->intval);
-		break;
-#endif
 	case POWER_SUPPLY_PROP_CAPACITY:
 		chip->fake_battery_soc = val->intval;
 		pr_debug("power supply changed batt_psy\n");
@@ -2043,11 +1675,6 @@ static int qpnp_batt_power_set_property(struct power_supply *psy,
 	return rc;
 }
 
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, CR-1007809, 2015/06/02, add power off condition */
-#ifdef CONFIG_TCT_8909_COMMON
-static bool recheck_flag = true;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 static int qpnp_batt_power_get_property(struct power_supply *psy,
 				       enum power_supply_property psp,
 				       union power_supply_propval *val)
@@ -2056,27 +1683,8 @@ static int qpnp_batt_power_get_property(struct power_supply *psy,
 		container_of(psy, struct qpnp_lbc_chip, batt_psy);
 
 	switch (psp) {
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-	case POWER_SUPPLY_PROP_BATT_STATUS:
-		val->intval = get_prop_batt_status(chip);
-		break;
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = get_prop_batt_status(chip);
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-/* we must exclude: charging, but cosumption so huge that battery supplies power too. */
-		if (ever_full_flag &&
-			!(charging_flag && get_prop_current_now(chip)>0)
-			&& qpnp_lbc_is_usb_chg_plugged_in(chip)			// capacity can delay for 10s, but status cannot
-			) {
-				pr_debug("set fake status to full\n");
-				val->intval = POWER_SUPPLY_STATUS_FULL;
-			}
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 		val->intval = get_prop_charge_type(chip);
@@ -2095,58 +1703,10 @@ static int qpnp_batt_power_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		val->intval = get_prop_battery_voltage_now(chip);
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, CR-1007809, 2015/06/02, add power off condition */
-#ifdef CONFIG_TCT_8909_COMMON
-#ifdef FEATURE_TCTNB_MMITEST
-		if (val->intval <= 3100000)
-			val->intval = 3101000;
-#endif
-		if (unlikely(val->intval > 3100000 && recheck_flag == false)) {
-			cancel_delayed_work(&chip->low_voltage_detect_work);
-			recheck_flag = true;
-		}
-
-		if (unlikely(val->intval <= 3100000 && recheck_flag == true)) {
-			recheck_flag = false;
-			val->intval = 3101000;
-			schedule_delayed_work(&chip->low_voltage_detect_work,
-					msecs_to_jiffies(5000));
-			pr_err("Recheck battery voltage in 5 seconds!\n");
-		}
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
 		val->intval = get_prop_batt_temp(chip);
-#if defined FEATURE_TCTSH_FIX_BATTERY_TEMPERATURE
-		val->intval = DEFAULT_TEMP;
-#endif
-
 		break;
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-		val->intval = chip->cfg_cold_bat_decidegc;
-		break;
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-		val->intval = chip->cfg_overheat_bat_decidegc;
-		break;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-#if (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-	case POWER_SUPPLY_PROP_COLD_TEMP:
-		val->intval = chip->cfg_cold_bat_decidegc;
-		break;
-	case POWER_SUPPLY_PROP_OVER_37_TEMP:
-		val->intval = chip->cfg_over_37_bat_decidegc;
-		break;
-	case POWER_SUPPLY_PROP_OVER_42_TEMP:
-		 val->intval = chip->cfg_over_42_bat_decidegc;
-		 break;
-	case POWER_SUPPLY_PROP_OVERHEAT_TEMP:
-		val->intval = chip->cfg_overheat_bat_decidegc;
-		break;
-#endif
 	case POWER_SUPPLY_PROP_COOL_TEMP:
 		val->intval = chip->cfg_cool_bat_decidegc;
 		break;
@@ -2155,20 +1715,6 @@ static int qpnp_batt_power_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		val->intval = get_prop_capacity(chip);
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-		if (val->intval == 100 && qpnp_lbc_is_usb_chg_plugged_in(chip))
-			ever_full_flag = true;
-
-/* we must exclude: charging, but cosumption so huge that battery supplies power too. */
-		if (ever_full_flag &&
-			!(charging_flag && get_prop_current_now(chip)>0)
-			) {
-			pr_debug("set fake status to full\n");
-			val->intval = 100;
-		}
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		val->intval = get_prop_current_now(chip);
@@ -2326,400 +1872,7 @@ static int qpnp_lbc_parallel_get_property(struct power_supply *psy,
 	return 0;
 }
 
-/*[PLATFORM]-Add-BEGIN by TCTSZ.leo.guo, 2015/07/20, add battery status debug message*/
-#ifdef CONFIG_QPNP_BATT_STATUS_DEBUG
-#define QPNP_CHG_MONOTOR_INTERVAL 		10*HZ
-static void qpnp_chg_monitor_work_callback(struct work_struct *work)
-{
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct qpnp_lbc_chip *chip = container_of(dwork,
-			struct qpnp_lbc_chip, monitor_workqueue);
-	struct timeval now;
-	struct rtc_time tm;
-	int voltage = get_prop_battery_voltage_now(chip);
-	int capacity = get_prop_capacity(chip);
-	int temperature = get_prop_batt_temp(chip);
 
-	chip->index++;
-	do_gettimeofday(&now);
-	rtc_time_to_tm(now.tv_sec, &tm);
-	INFO("%-8d    %02d:%02d:%02d    %8d    %3d%%    %3dC",chip->index, tm.tm_hour, tm.tm_min, tm.tm_sec, voltage, capacity, temperature);
-//[PLATFORM]-Modify-BEGIN by TCTSZ.Leo.guo, 2014/12/25, Fixed battery percentage increase gap one by one.
-	power_supply_changed(&chip->batt_psy);
-//[PLATFORM]-Modify-END by TCTSZ.Leo.guo, 2014/12/25
-    if (!qpnp_lbc_is_usb_chg_plugged_in(chip) &&
-			wake_lock_active(&chip->monitor_wake_lock)){
-		wake_unlock(&chip->monitor_wake_lock);
-	}
-	else if (qpnp_lbc_is_usb_chg_plugged_in(chip)&&
-				!wake_lock_active(&chip->monitor_wake_lock)){
-		wake_lock(&chip->monitor_wake_lock);
-	}
-	schedule_delayed_work(&chip->monitor_workqueue, QPNP_CHG_MONOTOR_INTERVAL);
-}
-#endif
-
-
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-static void qpnp_lbc_jeita_adc_notification(enum qpnp_tm_state state, void *ctx)
-{
-	struct qpnp_lbc_chip *chip = ctx;
-	bool bat_warm = false, bat_cold = false, bat_overheat = false, bat_cool = false;
-	int temp, rc;
-	unsigned long flags;
-
-	if (state >= ADC_TM_STATE_NUM) {
-		pr_err("invalid notification %d\n", state);
-		return;
-	}
-
-	temp = get_prop_batt_temp(chip);
-
-	pr_err("temp = %d state = %s\n", temp,
-			state == ADC_TM_WARM_STATE ? "warm" : "cool");
-
-	if (state == ADC_TM_WARM_STATE) {
-		if (temp >= chip->cfg_overheat_bat_decidegc) {
-			/* Warm to overheat */
-			bat_warm = false;
-			bat_cold = false;
-			bat_cool = false;
-			bat_overheat = true;
-			chip->adc_param.low_temp = chip->cfg_overheat_bat_decidegc - 30;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_THR_ENABLE;
-		} else if (temp >= chip->cfg_warm_bat_decidegc) {
-			/* Normal to warm */
-			bat_warm = true;
-			bat_cold = false;
-			bat_cool = false;
-			bat_overheat = false;
-			chip->adc_param.low_temp = chip->cfg_warm_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_overheat_bat_decidegc;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp >= chip->cfg_cool_bat_decidegc) {
-			/* Cool to normal */
-			bat_warm = false;
-			bat_cold = false;
-			bat_cool = false;
-			bat_overheat = false;
-			chip->adc_param.low_temp = chip->cfg_cool_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_warm_bat_decidegc;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-
-		} else if (temp >=
-			chip->cfg_cold_bat_decidegc) {
-			/* Cold to cool */
-			bat_warm = false;
-			bat_cold = false;
-			bat_cool = true;
-			bat_overheat = false;
-
-			chip->adc_param.low_temp =
-					chip->cfg_cold_bat_decidegc;
-			chip->adc_param.high_temp =
-					chip->cfg_cool_bat_decidegc;
-			chip->adc_param.state_request =
-					ADC_TM_HIGH_LOW_THR_ENABLE;
-		}
-	} else {
-		if (temp <= chip->cfg_cold_bat_decidegc) {
-			/* Cool to cold */
-			bat_warm = false;
-			bat_cold = true;
-			bat_cool = false;
-			bat_overheat = false;
-			chip->adc_param.high_temp =
-					chip->cfg_cold_bat_decidegc + 20;
-			chip->adc_param.state_request =
-					ADC_TM_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_warm_bat_decidegc){
-			/* Normal to cool */
-			bat_warm = false;
-			bat_cold = false;
-			bat_cool = true;
-			bat_overheat = false;
-
-			chip->adc_param.low_temp = chip->cfg_cold_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_cool_bat_decidegc;
-			chip->adc_param.state_request =
-					ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_overheat_bat_decidegc) {
-			/* Warm to normal */
-			bat_warm = false;
-			bat_cold = false;
-			bat_cool = false;
-			bat_overheat = false;
-
-			chip->adc_param.low_temp = chip->cfg_cool_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_warm_bat_decidegc;
-			chip->adc_param.state_request =
-					ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_overheat_bat_decidegc) {
-			/* Overheat to warm */
-			bat_warm = true;
-			bat_cold = false;
-			bat_cool = false;
-			bat_overheat = false;
-
-			chip->adc_param.low_temp = chip->cfg_warm_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_overheat_bat_decidegc;
-			chip->adc_param.state_request =
-					ADC_TM_HIGH_LOW_THR_ENABLE;
-		}
-	}
-
-	pr_err("cold = %d, overheat = %d, warm = %d, cool = %d\n",
-			chip->bat_is_cold ^ bat_cold, chip->bat_is_overheat ^ bat_overheat, chip->bat_is_warm ^ bat_warm, chip->bat_is_cool^bat_cool);
-
-	if (chip->bat_is_cold ^ bat_cold || chip->bat_is_overheat ^ bat_overheat || chip->bat_is_warm ^ bat_warm || chip->bat_is_cool^bat_cool) {
-		/* Disable charging if highest value selected by */
-		spin_lock_irqsave(&chip->ibat_change_lock, flags);
-		if (bat_cold || bat_overheat) {
-			chip->bat_is_overheat = bat_overheat;
-			chip->bat_is_cold = bat_cold;
-			chip->bat_is_warm = bat_warm;
-			rc = qpnp_lbc_charger_enable(chip, THERMAL, 0);
-		} else {
-			if (chip->bat_is_cold ^ bat_cold || chip->bat_is_overheat ^ bat_overheat) {
-				rc = qpnp_lbc_charger_enable(chip, THERMAL, 1);
-				if (rc < 0)
-					dev_err(chip->dev,
-						"Failed to set disable charging rc %d\n", rc);
-			}
-			pr_err("limit voltage and current\n");
-			chip->bat_is_overheat = bat_overheat;
-			chip->bat_is_cold = bat_cold;
-			chip->bat_is_warm = bat_warm;
-			chip->bat_is_cool = bat_cool;
-			qpnp_lbc_set_appropriate_vddmax(chip);
-			qpnp_lbc_set_appropriate_current(chip);
-		}
-		spin_unlock_irqrestore(&chip->ibat_change_lock, flags);
-	}
-
-	pr_err("overheat %d, warm %d, cold %d, cool %d, low = %d deciDegC, high = %d deciDegC\n",
-			chip->bat_is_overheat, chip->bat_is_warm, chip->bat_is_cold, chip->bat_is_cool,
-			chip->adc_param.low_temp, chip->adc_param.high_temp);
-
-	if (qpnp_adc_tm_channel_measure(chip->adc_tm_dev, &chip->adc_param))
-		pr_err("request ADC error\n");
-
-	power_supply_changed(&chip->batt_psy);
-}
-#elif(defined JRD_CHARGING_POLICY_FOR_PIXI355)
-static void qpnp_lbc_jeita_adc_notification(enum qpnp_tm_state state, void *ctx)
-{
-	struct qpnp_lbc_chip *chip = ctx;
-	bool bat_warm = false, bat_cold = false, bat_overheat = false, bat_cool = false, bat_over_37 = false, bat_over_42 = false;
-	int temp, rc;
-	unsigned long flags;
-
-	if (state >= ADC_TM_STATE_NUM) {
-		pr_err("invalid notification %d\n", state);
-		return;
-	}
-
-	temp = get_prop_batt_temp(chip);
-
-	pr_err("temp = %d state = %s\n", temp,
-			state == ADC_TM_WARM_STATE ? "warm" : "cool");
-
-	if (state == ADC_TM_WARM_STATE) {
-		if (temp >= chip->cfg_overheat_bat_decidegc) {
-			/* warm to overheat */
-			bat_overheat = true;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_overheat_bat_decidegc - 50;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_THR_ENABLE;
-		} else if (temp > chip->cfg_warm_bat_decidegc) {
-			/* over42 to warm */
-			bat_overheat = false;
-			bat_warm = true;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_warm_bat_decidegc - 20;
-			chip->adc_param.high_temp = chip->cfg_overheat_bat_decidegc;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp > chip->cfg_over_42_bat_decidegc) {
-			/* over37 to over42 */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = true;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_over_42_bat_decidegc - 30;
-			chip->adc_param.high_temp = chip->cfg_warm_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp > chip->cfg_over_37_bat_decidegc) {
-			/* normal to over37 */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = true;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_over_37_bat_decidegc - 10;
-			chip->adc_param.high_temp = chip->cfg_over_42_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp > chip->cfg_cool_bat_decidegc) {
-			/* Cool to normal */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_cool_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_over_37_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp > chip->cfg_cold_bat_decidegc) {
-			/* Cold to cool */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = true;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_cold_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_cool_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		}
-	} else {
-		if (temp <= chip->cfg_cold_bat_decidegc) {
-			/* Cool to cold */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = true;
-			chip->adc_param.high_temp = chip->cfg_cold_bat_decidegc + 10;
-			chip->adc_param.state_request = ADC_TM_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_cool_bat_decidegc){
-			/* normal to cool */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = true;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_cold_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_cool_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_over_37_bat_decidegc - 10){
-			/* over37 to normal */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_cool_bat_decidegc;
-			chip->adc_param.high_temp = chip->cfg_over_37_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_over_42_bat_decidegc - 30) {
-			/* over42 to over37 */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = false;
-			bat_over_37 = true;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_over_37_bat_decidegc - 10;
-			chip->adc_param.high_temp = chip->cfg_over_42_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_warm_bat_decidegc - 20) {
-			/* Warm to over42 */
-			bat_overheat = false;
-			bat_warm = false;
-			bat_over_42 = true;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_over_42_bat_decidegc - 30;
-			chip->adc_param.high_temp = chip->cfg_warm_bat_decidegc + 10;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		} else if (temp <= chip->cfg_overheat_bat_decidegc - 50) {
-			/* Overheat to warm */
-			bat_overheat = false;
-			bat_warm = true;
-			bat_over_42 = false;
-			bat_over_37 = false;
-			bat_cool = false;
-			bat_cold = false;
-			chip->adc_param.low_temp = chip->cfg_warm_bat_decidegc - 20;
-			chip->adc_param.high_temp = chip->cfg_overheat_bat_decidegc;
-			chip->adc_param.state_request =
-				ADC_TM_HIGH_LOW_THR_ENABLE;
-		}
-	}
-
-	pr_err("cold = %d, overheat = %d, over_37 = %d, over_42 = %d, warm = %d, cool = %d\n",
-			chip->bat_is_cold ^ bat_cold, chip->bat_is_overheat ^ bat_overheat, chip->bat_is_over_37 ^ bat_over_37, chip->bat_is_over_42 ^ bat_over_42, chip->bat_is_warm ^ bat_warm, chip->bat_is_cool^bat_cool);
-
-	if (chip->bat_is_cold ^ bat_cold || chip->bat_is_overheat ^ bat_overheat || chip->bat_is_over_37 ^ bat_over_37 || chip->bat_is_over_42 ^ bat_over_42|| chip->bat_is_warm ^ bat_warm || chip->bat_is_cool^bat_cool) {
-		/* Disable charging if highest value selected by */
-		spin_lock_irqsave(&chip->ibat_change_lock, flags);
-
-		if (bat_cold || bat_overheat) {
-			chip->bat_is_overheat = bat_overheat;
-			chip->bat_is_warm = bat_warm;
-			chip->bat_is_cold = bat_cold;
-			chip->bat_is_cool = bat_cool;
-			rc = qpnp_lbc_charger_enable(chip, THERMAL, 0);
-		} else {
-			if (chip->bat_is_cold ^ bat_cold || chip->bat_is_overheat ^ bat_overheat) {
-				rc = qpnp_lbc_charger_enable(chip, THERMAL, 1);
-				if (rc < 0)
-					dev_err(chip->dev, "Failed to set disable charging rc %d\n", rc);
-			}
-
-			pr_err("limit voltage and current\n");
-
-			chip->bat_is_overheat = bat_overheat;
-			chip->bat_is_warm = bat_warm;
-			chip->bat_is_over_42= bat_over_42;
-			chip->bat_is_over_37= bat_over_37;
-			chip->bat_is_cool = bat_cool;
-			chip->bat_is_cold = bat_cold;
-			qpnp_lbc_set_appropriate_vddmax(chip);
-			qpnp_lbc_set_appropriate_current(chip);
-		}
-
-		spin_unlock_irqrestore(&chip->ibat_change_lock, flags);
-	}
-
-	pr_err("overheat %d, warm %d, over_37 %d, over_42 %d, cold %d, cool %d, low = %d deciDegC, high = %d deciDegC\n",
-			chip->bat_is_overheat, chip->bat_is_warm, chip->bat_is_over_37, chip->bat_is_over_42, chip->bat_is_cold, chip->bat_is_cool,
-			chip->adc_param.low_temp, chip->adc_param.high_temp);
-
-	if (qpnp_adc_tm_channel_measure(chip->adc_tm_dev, &chip->adc_param))
-		pr_err("request ADC error\n");
-
-	power_supply_changed(&chip->batt_psy);
-}
-#else
 static void qpnp_lbc_jeita_adc_notification(enum qpnp_tm_state state, void *ctx)
 {
 	struct qpnp_lbc_chip *chip = ctx;
@@ -2789,12 +1942,6 @@ static void qpnp_lbc_jeita_adc_notification(enum qpnp_tm_state state, void *ctx)
 		spin_lock_irqsave(&chip->ibat_change_lock, flags);
 		chip->bat_is_cool = bat_cool;
 		chip->bat_is_warm = bat_warm;
-	#if defined(CONFIG_TCT_FCC_TEST_SUPPORT)
-		if(bat_cool || bat_warm)
-			qpnp_lbc_charger_enable(chip, THERMAL, 0);
-		else
-			qpnp_lbc_charger_enable(chip, THERMAL, 1);
-	#endif
 		qpnp_lbc_set_appropriate_vddmax(chip);
 		qpnp_lbc_set_appropriate_current(chip);
 		spin_unlock_irqrestore(&chip->ibat_change_lock, flags);
@@ -2807,8 +1954,6 @@ static void qpnp_lbc_jeita_adc_notification(enum qpnp_tm_state state, void *ctx)
 	if (qpnp_adc_tm_channel_measure(chip->adc_tm_dev, &chip->adc_param))
 		pr_err("request ADC error\n");
 }
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 
 #define IBAT_TERM_EN_MASK		BIT(3)
 static int qpnp_lbc_chg_init(struct qpnp_lbc_chip *chip)
@@ -3035,6 +2180,7 @@ static int show_lbc_config(struct seq_file *m, void *data)
 			"cfg_min_voltage_mv\t=\t%d\n"
 			"cfg_charger_detect_eoc\t=\t%d\n"
 			"cfg_disable_vbatdet_based_recharge\t=\t%d\n"
+			"cfg_collapsible_chgr_support\t=\t%d\n"
 			"cfg_batt_weak_voltage_uv\t=\t%d\n"
 			"cfg_warm_bat_mv\t=\t%d\n"
 			"cfg_cool_bat_mv\t=\t%d\n"
@@ -3060,6 +2206,7 @@ static int show_lbc_config(struct seq_file *m, void *data)
 			chip->cfg_min_voltage_mv,
 			chip->cfg_charger_detect_eoc,
 			chip->cfg_disable_vbatdet_based_recharge,
+			chip->cfg_collapsible_chgr_support,
 			chip->cfg_batt_weak_voltage_uv,
 			chip->cfg_warm_bat_mv,
 			chip->cfg_cool_bat_mv,
@@ -3108,25 +2255,6 @@ do {									\
 				" property rc = %d\n", rc);		\
 } while (0)
 
-#if defined(CONFIG_TCT_SMB1360_AND_PM8909_CHARGER)
-#define TCT_CHG_OPTION_REG 				0x1008
-#define TCT_CHG_OPTION_MASK				BIT(7)
-static bool qpnp_lbc_chg_option(struct qpnp_lbc_chip *chip)
-{
-	u8 reg_val;
-	int rc;
-
-	rc = qpnp_lbc_read(chip, TCT_CHG_OPTION_REG, &reg_val, 1);
-	if (rc) {
-		pr_err("Failed to read charger option rc=%d\n", rc);
-		return rc;
-	}	
-	pr_err("charger option rt status %x\n", reg_val);	
-
-	return (reg_val & TCT_CHG_OPTION_MASK) ? 1 : 0;
-}
-#endif
-
 static int qpnp_charger_read_dt_props(struct qpnp_lbc_chip *chip)
 {
 	int rc = 0;
@@ -3140,25 +2268,8 @@ static int qpnp_charger_read_dt_props(struct qpnp_lbc_chip *chip)
 		pr_err("Error reading required property rc=%d\n", rc);
 
 	OF_PROP_READ(chip, cfg_tchg_mins, "tchg-mins", rc, 1);
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	OF_PROP_READ(chip, cfg_cold_bat_decidegc, "cold-bat-decidegc", rc, 1);
-	OF_PROP_READ(chip, cfg_overheat_bat_decidegc, "overheat-bat-decidegc", rc, 1);
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-#if (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-	OF_PROP_READ(chip, cfg_cold_bat_decidegc, "cold-bat-decidegc", rc, 1);
-	OF_PROP_READ(chip, cfg_over_37_bat_decidegc, "over-37-bat-decidegc", rc, 1);
-	OF_PROP_READ(chip, cfg_over_42_bat_decidegc, "over-42-bat-decidegc", rc, 1);
-	OF_PROP_READ(chip, cfg_overheat_bat_decidegc, "overheat-bat-decidegc", rc, 1);
-#endif
-#if defined(CONFIG_TCT_FCC_TEST_SUPPORT)
-	chip->cfg_cool_bat_decidegc = 0;
-	chip->cfg_warm_bat_decidegc = 550;
-#else
 	OF_PROP_READ(chip, cfg_warm_bat_decidegc, "warm-bat-decidegc", rc, 1);
 	OF_PROP_READ(chip, cfg_cool_bat_decidegc, "cool-bat-decidegc", rc, 1);
-#endif
 	OF_PROP_READ(chip, cfg_hot_batt_p, "batt-hot-percentage", rc, 1);
 	OF_PROP_READ(chip, cfg_cold_batt_p, "batt-cold-percentage", rc, 1);
 	OF_PROP_READ(chip, cfg_batt_weak_voltage_uv, "vbatweak-uv", rc, 1);
@@ -3212,13 +2323,9 @@ static int qpnp_charger_read_dt_props(struct qpnp_lbc_chip *chip)
 			chip->spmi->dev.of_node, "qcom,btc-disabled");
 
 	/* Get the charging-disabled property */
-#if defined(CONFIG_TCT_SMB1360_AND_PM8909_CHARGER)
-	chip->cfg_charging_disabled = !qpnp_lbc_chg_option(chip);
-#else	
 	chip->cfg_charging_disabled =
 		of_property_read_bool(chip->spmi->dev.of_node,
 					"qcom,charging-disabled");
-#endif		
 
 	/* Get the fake-batt-values property */
 	chip->cfg_use_fake_battery =
@@ -3245,20 +2352,17 @@ static int qpnp_charger_read_dt_props(struct qpnp_lbc_chip *chip)
 			of_property_read_bool(chip->spmi->dev.of_node,
 					"qcom,chgr-led-support");
 
-	chip->cfg_bms_controlled_charging =
+	/* Get the collapsible charger support property */
+	chip->cfg_collapsible_chgr_support =
 			of_property_read_bool(chip->spmi->dev.of_node,
-					"qcom,bms-controlled-charging");
+					"qcom,collapsible-chgr-support");
 
 	/* Disable charging when faking battery values */
 	if (chip->cfg_use_fake_battery)
 		chip->cfg_charging_disabled = true;
 
-#if defined(CONFIG_TCT_SMB1360_AND_PM8909_CHARGER)
-	chip->cfg_use_external_charger = !qpnp_lbc_chg_option(chip);
-#else	
 	chip->cfg_use_external_charger = of_property_read_bool(
 			chip->spmi->dev.of_node, "qcom,use-external-charger");
-#endif
 
 	if (of_find_property(chip->spmi->dev.of_node,
 					"qcom,thermal-mitigation",
@@ -3312,10 +2416,44 @@ static int qpnp_charger_read_dt_props(struct qpnp_lbc_chip *chip)
 			chip->cfg_charger_detect_eoc,
 			chip->cfg_disable_vbatdet_based_recharge,
 			chip->cfg_chgr_led_support);
-	pr_debug("use-external-charger=%d, thermal_levels=%d\n",
+	pr_debug("collapsible-chg-support=%d, use-external-charger=%d, thermal_levels=%d\n",
+			chip->cfg_collapsible_chgr_support,
 			chip->cfg_use_external_charger,
 			chip->cfg_thermal_levels);
 	return rc;
+}
+
+#define CHG_REMOVAL_DETECT_DLY_MS	300
+static irqreturn_t qpnp_lbc_chg_gone_irq_handler(int irq, void *_chip)
+{
+	struct qpnp_lbc_chip *chip = _chip;
+	int chg_gone;
+
+	if (chip->cfg_collapsible_chgr_support) {
+		chg_gone = qpnp_lbc_is_chg_gone(chip);
+		pr_debug("chg-gone triggered, rt_sts: %d\n", chg_gone);
+		if (chg_gone) {
+			/*
+			 * Disable charger to prevent fastchg irq storming
+			 * if a non-collapsible charger is being used.
+			 */
+			pr_debug("disable charging for non-collapsbile charger\n");
+			qpnp_lbc_charger_enable(chip, COLLAPSE, 0);
+			qpnp_lbc_disable_irq(chip, &chip->irqs[USBIN_VALID]);
+			qpnp_lbc_disable_irq(chip, &chip->irqs[USB_CHG_GONE]);
+			qpnp_chg_collapsible_chgr_config(chip, 0);
+			/*
+			 * Check after a delay if the charger is still
+			 * inserted. It decides if a non-collapsible
+			 * charger is being used, or charger has been
+			 * removed.
+			 */
+			schedule_delayed_work(&chip->collapsible_detection_work,
+				msecs_to_jiffies(CHG_REMOVAL_DETECT_DLY_MS));
+		}
+	}
+
+	return IRQ_HANDLED;
 }
 
 static irqreturn_t qpnp_lbc_usbin_valid_irq_handler(int irq, void *_chip)
@@ -3336,6 +2474,10 @@ static irqreturn_t qpnp_lbc_usbin_valid_irq_handler(int irq, void *_chip)
 			qpnp_lbc_set_appropriate_current(chip);
 			spin_unlock_irqrestore(&chip->ibat_change_lock,
 								flags);
+			if (chip->supported_feature_flag & VDD_TRIM_SUPPORTED)
+				alarm_try_to_cancel(&chip->vddtrim_alarm);
+			if (chip->cfg_collapsible_chgr_support)
+				chip->non_collapsible_chgr_detected = false;
 		} else {
 			/*
 			 * Override VBAT_DET comparator to start charging
@@ -3344,6 +2486,16 @@ static irqreturn_t qpnp_lbc_usbin_valid_irq_handler(int irq, void *_chip)
 			if (!chip->cfg_disable_vbatdet_based_recharge)
 				qpnp_lbc_vbatdet_override(chip, OVERRIDE_0);
 
+			/*
+			 * If collapsible charger supported, enable chgr_gone
+			 * irq, and configure for collapsible charger.
+			 */
+			if (chip->cfg_collapsible_chgr_support &&
+					!chip->non_collapsible_chgr_detected) {
+				qpnp_lbc_enable_irq(chip,
+						&chip->irqs[USB_CHG_GONE]);
+				qpnp_chg_collapsible_chgr_config(chip, 1);
+			}
 			/*
 			 * Enable SOC based charging to make sure
 			 * charging gets enabled on USB insertion
@@ -3355,16 +2507,6 @@ static irqreturn_t qpnp_lbc_usbin_valid_irq_handler(int irq, void *_chip)
 		pr_debug("Updating usb_psy PRESENT property\n");
 		power_supply_set_present(chip->usb_psy, chip->usb_present);
 	}
-
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-	if (!usb_present) {
-		alarm_start_relative(&chip->ever_full_flag_alarm, ns_to_ktime(10LL * NSEC_PER_SEC));
-	}
-	else
-		alarm_cancel(&chip->ever_full_flag_alarm);
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
 
 	return IRQ_HANDLED;
 }
@@ -3411,30 +2553,14 @@ static irqreturn_t qpnp_lbc_batt_pres_irq_handler(int irq, void *_chip)
 		pr_debug("power supply changed batt_psy\n");
 		power_supply_changed(&chip->batt_psy);
 
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-		if ((chip->cfg_cold_bat_decidegc || chip->cfg_overheat_bat_decidegc || chip->cfg_cool_bat_decidegc
-#elif (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-		if ((chip->cfg_cold_bat_decidegc || chip->cfg_overheat_bat_decidegc || chip->cfg_over_37_bat_decidegc  || chip->cfg_over_42_bat_decidegc || chip->cfg_cool_bat_decidegc
-#else
 		if ((chip->cfg_cool_bat_decidegc
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 					|| chip->cfg_warm_bat_decidegc)
 					&& batt_present) {
 			pr_debug("enabling vadc notifications\n");
 			if (qpnp_adc_tm_channel_measure(chip->adc_tm_dev,
 						&chip->adc_param))
 				pr_err("request ADC error\n");
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-		} else if ((chip->cfg_cold_bat_decidegc || chip->cfg_overheat_bat_decidegc || chip->cfg_cool_bat_decidegc
-#elif(defined JRD_CHARGING_POLICY_FOR_PIXI355 )
-		} else if ((chip->cfg_cold_bat_decidegc || chip->cfg_overheat_bat_decidegc || chip->cfg_over_37_bat_decidegc || chip->cfg_over_42_bat_decidegc || chip->cfg_cool_bat_decidegc
-#else
 		} else if ((chip->cfg_cool_bat_decidegc
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 					|| chip->cfg_warm_bat_decidegc)
 					&& !batt_present) {
 			qpnp_adc_tm_disable_chan_meas(chip->adc_tm_dev,
@@ -3514,16 +2640,6 @@ static irqreturn_t qpnp_lbc_fastchg_irq_handler(int irq, void *_chip)
 			power_supply_changed(&chip->batt_psy);
 		}
 	}
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-	if (fastchg_on) {
-		schedule_delayed_work(&charging_flag_work, msecs_to_jiffies(60000));
-	} else {
-		cancel_delayed_work(&charging_flag_work);
-		charging_flag = false;
-	}
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
 
 	return IRQ_HANDLED;
 }
@@ -3600,8 +2716,7 @@ static irqreturn_t qpnp_lbc_usb_overtemp_irq_handler(int irq, void *_chip)
 
 static int qpnp_disable_lbc_charger(struct qpnp_lbc_chip *chip)
 {
-	int rc = 0;
-#if !defined(CONFIG_TCT_SMB1360_AND_PM8909_CHARGER)
+	int rc;
 	u8 reg;
 
 	reg = CHG_FORCE_BATT_ON;
@@ -3614,7 +2729,6 @@ static int qpnp_disable_lbc_charger(struct qpnp_lbc_chip *chip)
 	reg = BATT_ID_EN | BATT_BPD_OFFMODE_EN;
 	rc |= qpnp_lbc_write(chip, chip->bat_if_base + BAT_IF_BPD_CTRL_REG,
 								&reg, 1);
-#endif
 	return rc;
 }
 
@@ -3687,6 +2801,9 @@ static int qpnp_lbc_request_irqs(struct qpnp_lbc_chip *chip)
 	SPMI_REQUEST_IRQ(chip, USBIN_VALID, rc, usbin_valid, 0,
 			IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, 1);
 
+	SPMI_REQUEST_IRQ(chip, USB_CHG_GONE, rc, chg_gone, 0,
+			IRQF_TRIGGER_RISING, 1);
+
 	SPMI_REQUEST_IRQ(chip, USB_OVER_TEMP, rc, usb_overtemp, 0,
 			IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, 0);
 
@@ -3722,6 +2839,8 @@ static int qpnp_lbc_get_irqs(struct qpnp_lbc_chip *chip, u8 subtype,
 						USBIN_VALID, usbin-valid);
 		SPMI_GET_IRQ_RESOURCE(chip, rc, spmi_resource,
 						USB_OVER_TEMP, usb-over-temp);
+		SPMI_GET_IRQ_RESOURCE(chip, rc, spmi_resource,
+						USB_CHG_GONE, chg-gone);
 		break;
 	};
 
@@ -3737,8 +2856,33 @@ static void determine_initial_status(struct qpnp_lbc_chip *chip)
 	 * Set USB psy online to avoid userspace from shutting down if battery
 	 * capacity is at zero and no chargers online.
 	 */
-	if (chip->usb_present)
+	if (chip->usb_present) {
+		if (chip->cfg_collapsible_chgr_support &&
+				!chip->non_collapsible_chgr_detected) {
+			qpnp_lbc_enable_irq(chip,
+					&chip->irqs[USB_CHG_GONE]);
+			qpnp_chg_collapsible_chgr_config(chip, 1);
+		}
 		power_supply_set_online(chip->usb_psy, 1);
+	}
+}
+
+static void qpnp_lbc_collapsible_detection_work(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct qpnp_lbc_chip *chip = container_of(dwork,
+			struct qpnp_lbc_chip,
+			collapsible_detection_work);
+
+	if (qpnp_lbc_is_usb_chg_plugged_in(chip)) {
+		chip->non_collapsible_chgr_detected = true;
+		pr_debug("Non-collapsible charger detected\n");
+	} else {
+		chip->non_collapsible_chgr_detected = false;
+		pr_debug("Charger removal detected\n");
+	}
+	qpnp_lbc_charger_enable(chip, COLLAPSE, 1);
+	qpnp_lbc_enable_irq(chip, &chip->irqs[USBIN_VALID]);
 }
 
 #define IBAT_TRIM			-300
@@ -3801,147 +2945,6 @@ static enum alarmtimer_restart vddtrim_callback(struct alarm *alarm,
 
 	return ALARMTIMER_NORESTART;
 }
-
-/* [PLATFORM]-Add-BEGIN by TCTNJ.TPC, 2015/07/01 support battery id detect to disable charging */
-#if (defined CONFIG_TCT_8909_PIXI384G || defined JRD_BATTERY_ID_CHECK_FOR_PIXI355 || defined CONFIG_TCT_BATT_ID_SUPPORT)
-#if (defined JRD_BATTERY_ID_CHECK_FOR_PIXI355)
-#define BATTERY_BYD_ID_MIN_UV    100000
-#define BATTERY_BYD_ID_MAX_UV     500000 // BYD [0.1v, 0.5v]
-
-#define BATTERY_SCUD_ID_MIN_UV    1000000
-#define BATTERY_SCUD_ID_MAX_UV    1400000 // SCUD [1.0v, 1.4v]
-#else
-#define BATTERY_SCUD_ID_MIN_UV    500000
-#define BATTERY_SCUD_ID_MAX_UV	  1800000 //1200000
-#endif
-static int64_t qpnp_lbc_get_battery_id(struct qpnp_lbc_chip *chip)
-{
-	int rc;
-	struct qpnp_vadc_result result;
-
-	rc = qpnp_vadc_read(chip->vadc_dev, LR_MUX2_BAT_ID, &result);
-	pr_debug("error reading batt id channel = %d, batt_id = %lld\n",
-				LR_MUX2_BAT_ID, result.physical);
-	if (rc) {
-		pr_err("error reading batt id channel = %d, rc = %d\n",
-					LR_MUX2_BAT_ID, rc);
-		return rc;
-	}
-
-	return result.physical;
-}
-#endif
-/* [PLATFORM]-Add-END by TCTNJ.TPC, 2015/07/01 */
-
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, CR-1007809, 2015/06/02, add power off condition */
-#ifdef CONFIG_TCT_8909_COMMON
-static void low_voltage_detect_work_fn(struct work_struct *work)
-{
-	struct qpnp_lbc_chip *chip = container_of(work,
-				struct qpnp_lbc_chip, low_voltage_detect_work.work);
-
-		power_supply_changed(&chip->batt_psy);
-}
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-/* [PLATFORM]-Mod-BEGIN by TCTNB.YQJ, PR-878278, 2015/01/16, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_POP3
-#define POEWR_SUPPLY_CHANGE_PERIOD_MS	5000
-static void power_supply_change_work(struct work_struct *work)
-{
-	struct qpnp_lbc_chip *chip = container_of(work,
-				struct qpnp_lbc_chip, power_supply_change_work.work);
-	static int temp_pre = DEFAULT_TEMP;
-	int temp_now = get_prop_batt_temp(chip);
-	int voltage_now = get_prop_battery_voltage_now(chip);
-
-	pr_debug("temp_pre = %d, temp_now = %d, voltage_now = %d\n",
-				temp_pre, temp_now, voltage_now);
-
-	if ((abs(temp_now - temp_pre) >= 10) || (voltage_now < 3200000)) {
-		temp_pre = temp_now;
-		power_supply_changed(&chip->batt_psy);
-	}
-
-	schedule_delayed_work(&chip->power_supply_change_work,
-			msecs_to_jiffies(POEWR_SUPPLY_CHANGE_PERIOD_MS));
-}
-#endif
-/* [PLATFORM]-Add-END by TCTNB.YQJ */
-
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-#define BATT_ID_DETECT_PERIOD_MS	5000
-static void batt_id_detect_work(struct work_struct *work)
-{
-	struct qpnp_lbc_chip *chip = container_of(work,
-				struct qpnp_lbc_chip, batt_id_detect_work.work);
-	uint64_t battery_id = 0;
-	int rc;
-
-	battery_id = qpnp_lbc_get_battery_id(chip);
-	if (battery_id < 0){
-		pr_err("cannot read battery id err = %lld\n", battery_id);
-	}
-
-	rc = 0;
-#ifdef BATTERY_A_ID_MIN_UV
-	if((battery_id >= BATTERY_A_ID_MIN_UV) && (battery_id <= BATTERY_A_ID_MAX_UV))
-	{
-		rc = 1;
-	}
-#endif
-#ifdef BATTERY_B_ID_MIN_UV
-	if((battery_id >= BATTERY_B_ID_MIN_UV) && (battery_id <= BATTERY_B_ID_MAX_UV))
-	{
-		rc = 1;
-	}
-#endif
-
-	if(rc == 0)
-	{
-		chip->cfg_charging_disabled = true;
-		rc = qpnp_lbc_charger_enable(chip, BATT_ID, 0);
-		if (rc)
-			pr_err("Failed to disable charging rc=%d\n", rc);
-	}
-	else
-	{
-		chip->cfg_charging_disabled = false;
-		rc = qpnp_lbc_charger_enable(chip, BATT_ID, 1);
-		if (rc)
-			pr_err("Failed to disable charging rc=%d\n", rc);
-	}
-
-	schedule_delayed_work(&chip->batt_id_detect_work,
-			msecs_to_jiffies(BATT_ID_DETECT_PERIOD_MS));
-}
-#endif
-
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-static void ever_full_delay(struct work_struct *work)
-{
-	struct qpnp_lbc_chip *chip = container_of(work,
-				struct qpnp_lbc_chip, ever_full_flag_work);
-	ever_full_flag = false;
-
-	power_supply_changed(&chip->batt_psy);
-	pr_debug("set ever_full_flag false after usb unplugged 10 seconds\n");
-	pm_relax(chip->dev);
-}
-
-static enum alarmtimer_restart ever_full_flag_callback(struct alarm *alarm, ktime_t now)
-{
-	struct qpnp_lbc_chip *chip = container_of(alarm, struct qpnp_lbc_chip,
-			ever_full_flag_alarm);
-
-	pm_stay_awake(chip->dev);
-	schedule_work(&chip->ever_full_flag_work);
-
-	return ALARMTIMER_NORESTART;
-}
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 
 static int qpnp_lbc_parallel_charger_init(struct qpnp_lbc_chip *chip)
 {
@@ -4157,9 +3160,6 @@ static int qpnp_lbc_main_probe(struct spmi_device *spmi)
 	struct qpnp_lbc_chip *chip;
 	struct power_supply *usb_psy;
 	int rc = 0;
-/* [PLATFORM]-Add-BEGIN by TCTNJ.TPC, 2015/07/01 support battery id detect to disable charging */
-	uint64_t battery_id = 0;
-/* [PLATFORM]-Add-END by TCTNJ.TPC */
 
 	usb_psy = power_supply_get_by_name("usb");
 	if (!usb_psy) {
@@ -4187,27 +3187,8 @@ static int qpnp_lbc_main_probe(struct spmi_device *spmi)
 	spin_lock_init(&chip->irq_lock);
 	INIT_WORK(&chip->vddtrim_work, qpnp_lbc_vddtrim_work_fn);
 	alarm_init(&chip->vddtrim_alarm, ALARM_REALTIME, vddtrim_callback);
-
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, CR-1007809, 2015/06/02, add power off condition */
-#ifdef CONFIG_TCT_8909_COMMON
-	INIT_DELAYED_WORK(&chip->low_voltage_detect_work, low_voltage_detect_work_fn);
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-/* [PLATFORM]-Mod-BEGIN by TCTSZ.Leo.guo, 2015/07/20, add battery status debug message*/
-#ifdef CONFIG_QPNP_BATT_STATUS_DEBUG
-	INIT_DELAYED_WORK(&chip->monitor_workqueue, qpnp_chg_monitor_work_callback);
-#endif
-/* [PLATFORM]-Mod-END by TCTSZ.Leo.guo */
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-	INIT_WORK(&chip->ever_full_flag_work, ever_full_delay);
-	alarm_init(&chip->ever_full_flag_alarm, ALARM_REALTIME, ever_full_flag_callback);
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
-
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-	INIT_DELAYED_WORK(&chip->batt_id_detect_work, batt_id_detect_work);
-#endif
+	INIT_DELAYED_WORK(&chip->collapsible_detection_work,
+			qpnp_lbc_collapsible_detection_work);
 
 	/* Get all device-tree properties */
 	rc = qpnp_charger_read_dt_props(chip);
@@ -4292,30 +3273,10 @@ static int qpnp_lbc_main_probe(struct spmi_device *spmi)
 		}
 	}
 
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-	if ((chip->cfg_cold_bat_decidegc || chip->cfg_warm_bat_decidegc ||
-		 chip->cfg_overheat_bat_decidegc || chip->cfg_cool_bat_decidegc)
-#elif (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-	if ((chip->cfg_cold_bat_decidegc || chip->cfg_warm_bat_decidegc || chip->cfg_over_42_bat_decidegc ||
-		chip->cfg_over_37_bat_decidegc || chip->cfg_overheat_bat_decidegc || chip->cfg_cool_bat_decidegc)
-#else
 	if ((chip->cfg_cool_bat_decidegc || chip->cfg_warm_bat_decidegc)
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
 			&& chip->bat_if_base) {
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, FR-996156, 2015/05/27, add temperature protection */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined CONFIG_TCT_8909_PIXI384G)
-		chip->adc_param.low_temp = chip->cfg_cold_bat_decidegc;
-#else
 		chip->adc_param.low_temp = chip->cfg_cool_bat_decidegc;
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-#if (defined JRD_CHARGING_POLICY_FOR_PIXI355)
-		chip->adc_param.high_temp = chip->cfg_over_37_bat_decidegc;
-#else
 		chip->adc_param.high_temp = chip->cfg_warm_bat_decidegc;
-#endif
 		chip->adc_param.timer_interval = ADC_MEAS1_INTERVAL_1S;
 		chip->adc_param.state_request = ADC_TM_HIGH_LOW_THR_ENABLE;
 		chip->adc_param.btm_ctx = chip;
@@ -4358,13 +3319,6 @@ static int qpnp_lbc_main_probe(struct spmi_device *spmi)
 		alarm_start_relative(&chip->vddtrim_alarm, kt);
 	}
 
-/* [PLATFORM]-Mod-BEGIN by TCTNB.YQJ, PR-878278, 2015/01/16, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_POP3
-	schedule_delayed_work(&chip->power_supply_change_work,
-			msecs_to_jiffies(POEWR_SUPPLY_CHANGE_PERIOD_MS));
-#endif
-/* [PLATFORM]-Add-END by TCTNB.YQJ */
-
 	chip->debug_root = debugfs_create_dir("qpnp_lbc", NULL);
 	if (!chip->debug_root)
 		pr_err("Couldn't create debug dir\n");
@@ -4379,66 +3333,13 @@ static int qpnp_lbc_main_probe(struct spmi_device *spmi)
 			pr_err("Couldn't create lbc_config debug file\n");
 	}
 
-#if (defined JRD_BATTERY_ID_CHECK_FOR_PIXI355)
-	battery_id = qpnp_lbc_get_battery_id(chip);
-	if (battery_id < 0)
-		pr_err("cannot read battery id err = %lld\n", battery_id);
-
-#ifndef FEATURE_TCTSH_MMITEST
-	if(!(battery_id>BATTERY_BYD_ID_MIN_UV && battery_id <BATTERY_BYD_ID_MAX_UV) &&               // BYD [0.1v, 0.5v]
-		!(battery_id>BATTERY_SCUD_ID_MIN_UV && battery_id <BATTERY_SCUD_ID_MAX_UV)) {           // SCUD [1.0v, 1.4v]
-		chip->cfg_charging_disabled = true;
-		rc = qpnp_lbc_charger_enable(chip, USER, 0);
-		if (rc)
-			pr_err("Failed to disable charging rc=%d\n", rc);
-	}
-#endif
-#endif
-
-/* [PLATFORM]-Add-BEGIN by TCTNJ.TPC, 2015/07/01 support battery id detect to disable charging */
-#if defined(CONFIG_TCT_8909_PIXI384G)
-	battery_id = qpnp_lbc_get_battery_id(chip);
-	if (battery_id < 0) {
-		pr_err("cannot read battery id err = %lld\n", battery_id);
-	}
-#if defined(CONFIG_TCT_8909_PIXI384G) //[PLATFORM]-Add-BEGIN by TCTNJ.TPC, 2015/07/01, remove battery id detect.
-	if((battery_id < BATTERY_SCUD_ID_MIN_UV) || (battery_id > BATTERY_SCUD_ID_MAX_UV)) {
-		chip->cfg_charging_disabled = true;
-		rc = qpnp_lbc_charger_enable(chip, USER, 0);
-		if (rc)
-			pr_err("Failed to disable charging rc=%d\n", rc);
-	}
-#endif
-#endif
-/*[PLATFORM]-Add-END by TCTNJ.TPC*/
-
-#if defined(FEATURE_TCTSH_FAKE_BATTERY_FOR_CERT)
-       chip->cfg_charging_disabled = true;
-       rc = qpnp_lbc_charger_enable(chip, USER, 0);
-       if (rc)
-               pr_err("Failed to disable charging rc=%d\n", rc);
-#endif
-
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-	schedule_delayed_work(&chip->batt_id_detect_work,
-			msecs_to_jiffies(BATT_ID_DETECT_PERIOD_MS));
-#endif
-
-/* [PLATFORM]-Mod-BEGIN by TCTSZ.Leo.guo, 2015/07/20, add battery status debug message*/
-#ifdef CONFIG_QPNP_BATT_STATUS_DEBUG
-	schedule_delayed_work(&chip->monitor_workqueue, QPNP_CHG_MONOTOR_INTERVAL);
-	wake_lock_init(&chip->monitor_wake_lock, WAKE_LOCK_SUSPEND, "batt_status_debug");
-#endif
-/* [PLATFORM]-Mod-END by TCTSZ.Leo.guo */
-
-	pr_err("Probe chg_dis=%d bpd=%d usb=%d batt_pres=%d batt_volt=%d soc=%d  batt_id=%lld\n",
+	pr_info("Probe chg_dis=%d bpd=%d usb=%d batt_pres=%d batt_volt=%d soc=%d\n",
 			chip->cfg_charging_disabled,
 			chip->cfg_bpd_detection,
 			qpnp_lbc_is_usb_chg_plugged_in(chip),
 			get_prop_batt_present(chip),
 			get_prop_battery_voltage_now(chip),
-			get_prop_capacity(chip),
-            battery_id);
+			get_prop_capacity(chip));
 
 	return 0;
 
@@ -4473,30 +3374,7 @@ static int qpnp_lbc_remove(struct spmi_device *spmi)
 		alarm_cancel(&chip->vddtrim_alarm);
 		cancel_work_sync(&chip->vddtrim_work);
 	}
-
-/* [PLATFORM]-Mod-BEGIN by TCTNB.FLF, PR-1017864, 2015/06/16, fix capacity drops after charging full */
-#if (defined CONFIG_TCT_8909_PIXI37 || defined JRD_CHECK_CHARGING_FULL_FOR_PIXI355)
-	alarm_cancel(&chip->ever_full_flag_alarm);
-	cancel_work_sync(&chip->ever_full_flag_work);
-	cancel_delayed_work(&charging_flag_work);
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.FLF */
-
-/* [PLATFORM]-Mod-BEGIN by TCTNB.YQJ, PR-878278, 2015/01/16, improve the bat-temprt report frequency */
-#ifdef CONFIG_TCT_8909_POP3
-	cancel_delayed_work(&chip->power_supply_change_work);
-#endif
-/* [PLATFORM]-Mod-END by TCTNB.YQJ */
-/* [PLATFORM]-Add-BEGIN by TCTNB.FLF, CR-1007809, 2015/06/02, add power off condition */
-#ifdef CONFIG_TCT_8909_COMMON
-	cancel_delayed_work(&chip->low_voltage_detect_work);
-#endif
-/* [PLATFORM]-Add-END by TCTNB.FLF */
-
-#ifdef CONFIG_TCT_BATT_ID_SUPPORT
-	cancel_delayed_work(&chip->batt_id_detect_work);
-#endif
-
+	cancel_delayed_work_sync(&chip->collapsible_detection_work);
 	debugfs_remove_recursive(chip->debug_root);
 	if (chip->bat_if_base)
 		power_supply_unregister(&chip->batt_psy);

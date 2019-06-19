@@ -28,6 +28,10 @@ dtb-$(CONFIG_ARCH_MSM8974) += msm8974-v1-cdp.dtb \
 	msm8974pro-ac-pm8941-liquid.dtb \
 	msm8974pro-ac-pm8941-mtp.dtb \
 	msm8974pro-ac-pma8084-pm8941-mtp.dtb
+
+ifeq ($(CONFIG_MACH_HISENSE_MSM8909),y)
+dtb-$(CONFIG_ARCH_MSM8909) += msm8909-1gb-b16c2g.dtb
+else
 dtb-$(CONFIG_ARCH_MSM8909) += msm8909-sim.dtb \
 	msm8909-rumi.dtb \
 	msm8909-qrd-skua.dtb \
@@ -51,6 +55,8 @@ dtb-$(CONFIG_ARCH_MSM8909) += msm8909-sim.dtb \
 	msm8909-qhd-rcm.dtb \
 	msm8909-pm8916-1gb-qhd-rcm.dtb \
 	msm8909-pm8916-qhd-rcm.dtb \
+	msm8909-pm8916-qrd-skut-evt.dtb \
+	msm8909-pm8916-qrd-skut-dvt.dtb \
 	msm8208-cdp.dtb \
 	msm8208-mtp.dtb \
 	msm8208-1gb-cdp.dtb \
@@ -64,6 +70,8 @@ dtb-$(CONFIG_ARCH_MSM8909) += msm8909-sim.dtb \
 	msm8208-1gb-rcm.dtb \
 	msm8208-qhd-cdp.dtb \
 	msm8208-qhd-rcm.dtb
+endif
+
 dtb-$(CONFIG_ARCH_MSM8916) += msm8916-sim.dtb \
 	msm8916-rumi.dtb \
 	msm8916-cdp.dtb \

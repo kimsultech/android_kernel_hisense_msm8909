@@ -114,38 +114,6 @@ do {							\
 	local_irq_restore(dflags);			\
 } while (0)
 
-static atomic_t __su_instances;
-
-int su_instances(void)
-{
-	return atomic_read(&__su_instances);
-}
-
-bool su_running(void)
-{
-	return su_instances() > 0;
-}
-
-bool su_visible(void)
-{
-	kuid_t uid = current_uid();
-	if (su_running())
-		return true;
-	if (uid_eq(uid, GLOBAL_ROOT_UID) || uid_eq(uid, GLOBAL_SYSTEM_UID))
-		return true;
-	return false;
-}
-
-void su_exec(void)
-{
-	atomic_inc(&__su_instances);
-}
-
-void su_exit(void)
-{
-	atomic_dec(&__su_instances);
-}
-
 const char *task_event_names[] = {"PUT_PREV_TASK", "PICK_NEXT_TASK",
 				  "TASK_WAKE", "TASK_MIGRATE", "TASK_UPDATE",
 				"IRQ_UPDATE"};
@@ -1241,7 +1209,10 @@ unsigned int min_max_freq = 1;
 
 unsigned int max_capacity = 1024; /* max(rq->capacity) */
 unsigned int min_capacity = 1024; /* min(rq->capacity) */
-unsigned int max_load_scale_factor = 1024; /* max(rq->load_scale_factor) */
+unsigned int max_load_scale_factor = 1024; /* max possible load scale factor */
+unsigned int max_possible_capacity = 1024; /* max(rq->max_possible_capacity) */
+unsigned int min_max_possible_capacity = 1024; /* min(max_possible_capacity) */
+unsigned int min_max_capacity_delta_pct;
 
 /* Window size (in ns) */
 __read_mostly unsigned int sched_ravg_window = 10000000;
@@ -2287,6 +2258,7 @@ static void update_min_max_capacity(void)
 {
 	int i;
 	int max = 0, min = INT_MAX;
+	int max_pc = INT_MIN, min_pc = INT_MAX;
 	int max_lsf = 0;
 
 	for_each_possible_cpu(i) {
@@ -2297,11 +2269,22 @@ static void update_min_max_capacity(void)
 
 		if (cpu_rq(i)->load_scale_factor > max_lsf)
 			max_lsf = cpu_rq(i)->load_scale_factor;
+
+		max_pc = max(cpu_rq(i)->max_possible_capacity, max_pc);
+		if (cpu_rq(i)->max_possible_capacity > 0)
+			min_pc = min(cpu_rq(i)->max_possible_capacity, min_pc);
 	}
 
 	max_capacity = max;
 	min_capacity = min;
 	max_load_scale_factor = max_lsf;
+
+	max_possible_capacity = max_pc;
+	min_max_possible_capacity = min_pc;
+	BUG_ON(max_possible_capacity < min_max_possible_capacity);
+	min_max_capacity_delta_pct =
+	    div64_u64((u64)(max_possible_capacity - min_max_possible_capacity) *
+		      100, min_max_possible_capacity);
 }
 
 /*
@@ -2451,6 +2434,7 @@ static int cpufreq_notifier_policy(struct notifier_block *nb,
 	}
 
 	update_min_max_capacity();
+
 	post_big_small_task_count_change(cpu_possible_mask);
 
 	return 0;
