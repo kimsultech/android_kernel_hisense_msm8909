@@ -479,7 +479,7 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 	}
 	if (level->notify_rpm) {
 		struct cpumask nextcpu;
-		uint32_t us;
+		uint64_t us;
 
 		us = get_cluster_sleep_time(cluster, &nextcpu, from_idle);
 
@@ -490,7 +490,7 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 		}
 
 		do_div(us, USEC_PER_SEC/SCLK_HZ);
-		msm_mpm_enter_sleep((uint32_t)us, from_idle, &nextcpu);
+		msm_mpm_enter_sleep(us, from_idle, &nextcpu);
 	}
 	cluster->last_level = idx;
 	spin_unlock(&cluster->sync_lock);
@@ -594,13 +594,6 @@ static void cluster_unprepare(struct lpm_cluster *cluster,
 	level = &cluster->levels[cluster->last_level];
 	if (level->notify_rpm) {
 		msm_rpm_exit_sleep();
-
-		/* If RPM bumps up CX to turbo, unvote CX turbo vote
-		 * during exit of rpm assisted power collapse to
-		 * reduce the power impact
-		 */
-
-		lpm_wa_cx_unvote_send();
 		msm_mpm_exit_sleep(from_idle);
 	}
 

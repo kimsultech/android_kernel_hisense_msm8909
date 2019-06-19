@@ -467,6 +467,7 @@ static int AKECS_GetData_Poll(
 
 	/* Check ST bit */
 	if (!(AKM_DRDY_IS_HIGH(buffer[0]))) {
+	{
 		dev_dbg(&akm->i2c->dev, "DRDY is low. Use last value.\n");
 		return 0;
 	}
@@ -902,7 +903,7 @@ static int akm_enable_set(struct sensors_classdev *sensors_cdev,
 				akm->use_sng_measure = true;
 			}
 			ktime = ktime_set(0,
-					akm->delay[MAG_DATA_FLAG] * NSEC_PER_MSEC);
+				akm->delay[MAG_DATA_FLAG] * NSEC_PER_MSEC);
 			hrtimer_start(&akm->mag_timer, ktime, HRTIMER_MODE_REL);
 		} else {
 			ret = hrtimer_try_to_cancel(&akm->mag_timer);
@@ -1802,8 +1803,7 @@ static int mag_poll_thread(void *data)
 	int mag_x, mag_y, mag_z;
 	int tmp;
 
-	while(1)
-	{
+	while (1) {
 		wait_event_interruptible(akm->mag_wq,
 			((akm->mag_wkp_flag != 0) || kthread_should_stop()));
 		akm->mag_wkp_flag = 0;
@@ -1812,16 +1812,17 @@ static int mag_poll_thread(void *data)
 			break;
 
 		mutex_lock(&akm->val_mutex);
-		if(akm->mag_delay_change) {
-                        if(akm->delay[MAG_DATA_FLAG] <= POLL_MS_100HZ)
-                                set_wake_up_idle(true);
-                        else
-                                set_wake_up_idle(false);
-                        akm->mag_delay_change = false;
-                }
+		if (akm->mag_delay_change) {
+			if (akm->delay[MAG_DATA_FLAG] <= POLL_MS_100HZ)
+				set_wake_up_idle(true);
+			else
+				set_wake_up_idle(false);
+			akm->mag_delay_change = false;
+		}
 		mutex_unlock(&akm->val_mutex);
 
 		timestamp = ktime_get_boottime();
+
 
 		ret = AKECS_GetData_Poll(akm, dat_buf, AKM_SENSOR_DATA_SIZE);
 		if (ret < 0) {
